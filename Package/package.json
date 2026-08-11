@@ -1,0 +1,20 @@
+{
+  "name": "fr.lxtz.visual-git-diff",
+  "version": "0.1.0",
+  "displayName": "Visual Git Diff",
+  "description": "Inspector-style before/after diff viewer for Unity scenes and prefabs across git revisions.",
+  "unity": "6000.0",
+  "license": "GPL-3.0",
+  "author": {
+    "name": "Alexandre Wurtz",
+    "email": "me@lxtz.fr",
+    "url": "https://github.com/lxtzfr"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lxtzfr/visual-git-diff.git"
+  },
+  "dependencies": {
+    "org.nuget.yamldotnet": "18.1.0"
+  }
+}

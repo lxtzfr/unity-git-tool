@@ -1,0 +1,5 @@
+# Unity test project has its own git repo — ignore it entirely here.
+ProjetTest/
+
+# IDE
+.idea/
