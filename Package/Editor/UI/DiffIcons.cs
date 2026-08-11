@@ -128,16 +128,21 @@ namespace VisualGitDiff
                 }
             }
 
-            var icon = EditorGUIUtility.IconContent(iconName)?.image ?? GetGenericIcon();
+            var icon = EditorGUIUtility.FindTexture(iconName) ?? GetGenericIcon();
             PrefabAssetIconByGuid[guid] = icon;
             return icon;
         }
 
+        // EditorGUIUtility.IconContent logs an "Unable to load the icon" warning whenever the
+        // name doesn't resolve — which happens constantly here since GetDocumentIcon feeds it
+        // every YAML root key verbatim (e.g. scene-singleton objects like RenderSettings,
+        // LightmapSettings, NavMeshSettings have no matching built-in icon). FindTexture does
+        // the same built-in lookup but returns null silently instead of logging.
         private static Texture GetCachedBuiltinIcon(string cacheKey, string iconName)
         {
             if (ComponentIconCache.TryGetValue(cacheKey, out var cached)) return cached;
 
-            var icon = EditorGUIUtility.IconContent(iconName)?.image ?? GetGenericIcon();
+            var icon = EditorGUIUtility.FindTexture(iconName) ?? GetGenericIcon();
             ComponentIconCache[cacheKey] = icon;
             return icon;
         }
