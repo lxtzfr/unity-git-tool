@@ -79,7 +79,7 @@ This means a **parallel resolver**, not a JSON/YAML-shaped one:
   imported/cached) rather than just reading bytes off disk — slower per
   guid than the YAML path, though only paid once per session thanks to
   caching.
-- **Editor-only, already true.** `VisualGitDiff` is an Editor package
+- **Editor-only, already true.** `UnityGitTool` is an Editor package
   already, so this doesn't introduce a new constraint, but it does mean the
   feature is inherently tied to loading the actual referenced asset — if the
   asset is missing/broken/reimporting, this path degrades the same way

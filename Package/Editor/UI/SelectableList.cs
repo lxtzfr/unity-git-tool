@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UIElements;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     /// <summary>
     /// A vertical list of clickable rows with a single highlighted selection, backing both the
-    /// file list and the object list in <see cref="VisualGitDiffWindow"/>. Row content is
+    /// file list and the object list in <see cref="UnityGitToolWindow"/>. Row content is
     /// supplied by the caller; this class only owns row creation, click wiring, and the
     /// selected-row highlight.
     /// </summary>

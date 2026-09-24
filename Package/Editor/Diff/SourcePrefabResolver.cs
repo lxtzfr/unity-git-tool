@@ -3,9 +3,9 @@ using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>
     /// Reads a referenced prefab asset straight off disk (via its guid) and parses it the same

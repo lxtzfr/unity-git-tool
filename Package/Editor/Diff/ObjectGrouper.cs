@@ -1,9 +1,9 @@
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>
     /// Groups parsed documents the way a Unity user thinks about them: every Component

@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>
     /// Compares two parsed revisions of the same Unity YAML asset. Documents are matched
@@ -22,8 +22,8 @@ namespace VisualGitDiff.Diff
         };
 
         public static List<DocumentDiff> Compare(
-            IEnumerable<VisualGitDiff.Yaml.UnityYamlDocument> before,
-            IEnumerable<VisualGitDiff.Yaml.UnityYamlDocument> after)
+            IEnumerable<UnityGitTool.Yaml.UnityYamlDocument> before,
+            IEnumerable<UnityGitTool.Yaml.UnityYamlDocument> after)
         {
             var beforeByFileId = before.ToDictionary(d => d.FileId);
             var afterByFileId = after.ToDictionary(d => d.FileId);

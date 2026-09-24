@@ -3,10 +3,10 @@ using System.Linq;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
-using VisualGitDiff.Diff;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Diff;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     internal enum RowChangeKind { None, Added, Modified, Removed }
 

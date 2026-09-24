@@ -3,7 +3,7 @@ using System.IO;
 using System.Text.RegularExpressions;
 using YamlDotNet.RepresentationModel;
 
-namespace VisualGitDiff.Yaml
+namespace UnityGitTool.Yaml
 {
     /// <summary>
     /// Parses the multi-document YAML that Unity emits for text-serialized assets

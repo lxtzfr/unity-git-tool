@@ -1,7 +1,7 @@
 using System.Collections.Generic;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>Which section of the object list a group belongs to — keeps scene-level
     /// singletons (RenderSettings, NavMeshSettings, ...) from being visually indistinguishable

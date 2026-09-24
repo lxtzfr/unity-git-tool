@@ -92,7 +92,7 @@ children.
 **Test to write:** a synthesized node that is itself a deeper-nested-instance
 root must have its own real component list (GameObject, Transform, ...)
 filled in from the deeper prefab, not just its children. Also worth a
-regression test on `RenderColumn`'s empty-side message (`VisualGitDiffWindow.cs`)
+regression test on `RenderColumn`'s empty-side message (`UnityGitToolWindow.cs`)
 so a genuinely-empty side never shows a status-contradicting message (e.g.
 "removed" text on the after-side of an `Added` row) — not fixed this session,
 only worked around by fix #5 removing the empty-both-sides case that

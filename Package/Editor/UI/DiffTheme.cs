@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UIElements;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     /// <summary>Shared colors and small status-indicator widgets used across the diff window's panes.</summary>
     internal static class DiffTheme

@@ -1,4 +1,4 @@
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>Deterministically mixes two fileIds into one — used wherever a synthetic
     /// identity needs to be unique per (A, B) pair without a real document backing it, while

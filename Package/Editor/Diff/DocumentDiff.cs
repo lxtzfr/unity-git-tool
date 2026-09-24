@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     public enum DocumentChangeType
     {

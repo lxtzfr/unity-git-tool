@@ -3,9 +3,9 @@ using UnityEditor;
 using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.UIElements;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     /// <summary>Resolves the same small icons Unity itself uses (Project window, Hierarchy,
     /// Inspector) for files, GameObjects, and components, so the diff window's three list/tree

@@ -2,9 +2,9 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEditor.UIElements;
 using UnityEngine.UIElements;
-using VisualGitDiff.Git;
+using UnityGitTool.Git;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     /// <summary>
     /// Toolbar revision selector: a branch dropdown next to a commit dropdown, rather than one

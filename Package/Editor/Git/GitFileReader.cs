@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 
-namespace VisualGitDiff.Git
+namespace UnityGitTool.Git
 {
     /// <summary>
     /// Reads the content of a file at a given git revision without touching the working tree.

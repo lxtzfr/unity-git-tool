@@ -1,4 +1,4 @@
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     public enum FieldChangeType
     {

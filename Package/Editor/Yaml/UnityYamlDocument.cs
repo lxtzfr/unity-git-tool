@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace VisualGitDiff.Yaml
+namespace UnityGitTool.Yaml
 {
     /// <summary>
     /// One "--- !u!&lt;classId&gt; &amp;&lt;fileId&gt;" document from a Unity YAML asset

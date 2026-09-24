@@ -1,9 +1,9 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff.Diff
+namespace UnityGitTool.Diff
 {
     /// <summary>
     /// Stripped prefab-instance placeholders (a Transform/Component referenced from outside its

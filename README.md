@@ -1,4 +1,4 @@
-# Visual Git Diff
+# Unity Git Tool
 
 An Editor window for Unity that shows scene and prefab changes across git
 revisions the way the Inspector shows a GameObject: pick two revisions, see
@@ -6,7 +6,7 @@ which files changed, drill into a GameObject/component and get a real
 before/after field comparison — instead of reading raw YAML in a text diff
 tool.
 
-![Visual Git Diff window](docs/screenshot.png)
+![Unity Git Tool window](docs/screenshot.png)
 
 ## Features
 
@@ -46,7 +46,7 @@ tool.
 2. Add the package via the Unity Package Manager using the git URL:
 
    ```
-   https://github.com/lxtzfr/visual-git-diff.git?path=/Package
+   https://github.com/lxtzfr/unity-git-tool.git?path=/Package
    ```
 
    **Package Manager → `+` → Add package from git URL…**, paste the URL
@@ -54,13 +54,13 @@ tool.
 
 ## Usage
 
-Open **Window → Visual Git Diff → Diff Window**, pick a revision for each
+Open **Window → Unity Git Tool → Diff Window**, pick a revision for each
 side (branch, commit, or working tree), select a changed file from the list,
 then a GameObject to see its field-by-field diff.
 
 ## How it works
 
-Unity scenes and prefabs are plain-text YAML. Visual Git Diff reads both
+Unity scenes and prefabs are plain-text YAML. Unity Git Tool reads both
 revisions of a file straight from git (`GitFileReader`), parses them
 (`UnityYamlParser`), groups documents into a GameObject/component tree with
 nested prefab-instance resolution (`ObjectGrouper` / `PrefabOverrideHydrator`

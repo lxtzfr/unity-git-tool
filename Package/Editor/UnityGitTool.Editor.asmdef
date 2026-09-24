@@ -1,6 +1,6 @@
 {
-    "name": "VisualGitDiff.Editor",
-    "rootNamespace": "VisualGitDiff",
+    "name": "UnityGitTool.Editor",
+    "rootNamespace": "UnityGitTool",
     "references": [],
     "includePlatforms": [
         "Editor"

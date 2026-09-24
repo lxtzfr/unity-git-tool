@@ -5,22 +5,22 @@ using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
-using VisualGitDiff.Diff;
-using VisualGitDiff.Git;
-using VisualGitDiff.Yaml;
+using UnityGitTool.Diff;
+using UnityGitTool.Git;
+using UnityGitTool.Yaml;
 
-namespace VisualGitDiff
+namespace UnityGitTool
 {
     /// <summary>
     /// Main diff window: pick two revisions, see which files changed, then drill into
     /// GameObjects/documents for the selected file with an Inspector-style before/after
-    /// view. Layout mirrors the UI mock (<see cref="VisualGitDiffMockWindow"/>) but every
+    /// view. Layout mirrors the UI mock (<see cref="UnityGitToolMockWindow"/>) but every
     /// value here comes from the real git/parse/diff pipeline
     /// (<see cref="GitFileReader"/> / <see cref="UnityYamlParser"/> / <see cref="UnityYamlDiff"/>).
     /// Row rendering is delegated to <see cref="SelectableList{T}"/> (file/object lists) and
     /// <see cref="InspectorFieldView"/> (before/after field trees).
     /// </summary>
-    public class VisualGitDiffWindow : EditorWindow
+    public class UnityGitToolWindow : EditorWindow
     {
         private RevisionMenu _revisionAPicker;
         private RevisionMenu _revisionBPicker;
@@ -46,10 +46,10 @@ namespace VisualGitDiff
         private List<GitFileReader.ChangedFile> _changedFiles = new();
         private List<ObjectGroup> _currentGroups = new();
 
-        [MenuItem("Window/Visual Git Diff/Diff Window")]
+        [MenuItem("Window/Unity Git Tool/Diff Window")]
         private static void Open()
         {
-            var window = GetWindow<VisualGitDiffWindow>("Visual Git Diff");
+            var window = GetWindow<UnityGitToolWindow>("Unity Git Tool");
             window.minSize = new Vector2(1040, 480);
         }
 
