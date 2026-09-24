@@ -1,0 +1,16 @@
+# IDE
+.idea/
+.vs/
+*.user
+*.userprefs
+
+# Rider/Resharper
+*.DotSettings.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+[Oo]bj/
+[Bb]in/

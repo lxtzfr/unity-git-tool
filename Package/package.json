@@ -1,0 +1,17 @@
+{
+  "name": "fr.lxtz.unity-git-tool",
+  "version": "0.1.0",
+  "displayName": "Unity Git Tool",
+  "description": "Git tooling for Unity scenes and prefabs (diff, merge).",
+  "unity": "6000.0",
+  "license": "GPL-3.0",
+  "author": {
+    "name": "Alexandre Wurtz",
+    "email": "me@lxtz.fr",
+    "url": "https://github.com/lxtzfr"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lxtzfr/unity-git-tool.git"
+  }
+}
