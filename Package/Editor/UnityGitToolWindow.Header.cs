@@ -127,7 +127,10 @@ namespace UnityGitTool
                 menu.menu.AppendAction($"{branchName}/(tip)", _ => Select(branchName));
                 foreach (var commit in GitFileReader.ListCommits(branchName))
                 {
-                    var hash = commit.Hash;
+                    // The short hash is what gets displayed (as the menu's own text, and baked into
+                    // the A/B column titles) — the full 40-char SHA is long enough to wrap those and
+                    // grow the header's height. Git accepts either for every command this tool runs.
+                    var hash = commit.ShortHash;
                     menu.menu.AppendAction($"{branchName}/{commit}", _ => Select(hash));
                 }
             }
