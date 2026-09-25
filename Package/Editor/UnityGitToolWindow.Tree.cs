@@ -52,6 +52,8 @@ namespace UnityGitTool
             _currentRows = new List<MockRow>();
 
             var nextId = 0;
+            int NextId() => nextId++;
+
             var roots = new List<TreeViewItemData<MockNode>>();
             foreach (var file in GitFileReader.GetChangedFiles(_revisionA, _revisionB))
             {
@@ -61,21 +63,19 @@ namespace UnityGitTool
                 else if (extension == ".prefab") kind = MockNodeKind.PrefabFile;
                 else continue;
 
-                var id = nextId++;
-                MockDataSource.RowsByNodeId[id] = new List<MockRow>();
-                var node = new MockNode
+                var badge = file.Status switch
                 {
-                    Id = id,
-                    Label = Path.GetFileName(file.Path),
-                    Kind = kind,
-                    Badge = file.Status switch
-                    {
-                        GitChangeStatus.Added => MockBadge.Added,
-                        GitChangeStatus.Deleted => MockBadge.Removed,
-                        _ => MockBadge.Modified,
-                    },
+                    GitChangeStatus.Added => MockBadge.Added,
+                    GitChangeStatus.Deleted => MockBadge.Removed,
+                    _ => MockBadge.Modified,
                 };
-                roots.Add(new TreeViewItemData<MockNode>(id, node));
+                // A renamed file's old path only exists on the A side — GetChangedFiles already
+                // reports the new path for B, so read A back at its OldPath when there is one.
+                var contentA = GitFileReader.ReadFileAtRevision(_revisionA, file.OldPath ?? file.Path);
+                var contentB = GitFileReader.ReadFileAtRevision(_revisionB, file.Path);
+
+                roots.Add(UnityYamlDiffBuilder.BuildFileNode(
+                    NextId, MockDataSource.RowsByNodeId, Path.GetFileName(file.Path), kind, badge, contentA, contentB));
             }
 
             _tree.SetRootItems(roots);
