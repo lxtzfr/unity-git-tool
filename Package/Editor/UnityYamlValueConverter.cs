@@ -59,17 +59,22 @@ namespace UnityGitTool
             return string.Join(", ", map.Select(kv => $"{kv.Key}: {ToDisplayValue(kv.Value, byId)}"));
         }
 
-        private static string DescribeReference(Dictionary<string, object> map, Dictionary<long, GitYamlDocument> byId)
+        private static object DescribeReference(Dictionary<string, object> map, Dictionary<long, GitYamlDocument> byId)
         {
             var fileId = map["fileID"] as string ?? "0";
             if (fileId == "0") return "(none)";
 
             // A guid means this points at a whole other asset file — resolve it through the asset
-            // database rather than the local document graph.
+            // database rather than the local document graph. Loading the actual asset (not just its
+            // path) lets FieldFactory render a real, clickable ObjectField instead of inert text —
+            // only falls back to a filename string if the asset can't be loaded (e.g. deleted, or a
+            // sub-asset inside a composite file this only resolves the main representation of).
             if (map.TryGetValue("guid", out var guidValue) && guidValue is string guid)
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
-                return string.IsNullOrEmpty(path) ? $"guid:{guid}" : Path.GetFileName(path);
+                if (string.IsNullOrEmpty(path)) return $"guid:{guid}";
+                var asset = AssetDatabase.LoadMainAssetAtPath(path);
+                return asset != null ? asset : Path.GetFileName(path);
             }
 
             // No guid: it points at another object inside this same file — look it up by FileId in
