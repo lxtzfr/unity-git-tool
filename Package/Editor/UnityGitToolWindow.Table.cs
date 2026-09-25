@@ -43,8 +43,8 @@ namespace UnityGitTool
             return new Column
             {
                 title = "Property",
-                width = 220,
-                minWidth = 140,
+                width = 140,
+                minWidth = 90,
                 stretchable = true,
                 makeCell = () =>
                 {

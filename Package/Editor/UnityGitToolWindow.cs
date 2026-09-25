@@ -60,7 +60,7 @@ namespace UnityGitTool
 
             root.Add(BuildHeader());
 
-            var split = new TwoPaneSplitView(0, 260, TwoPaneSplitViewOrientation.Horizontal) { style = { flexGrow = 1 } };
+            var split = new TwoPaneSplitView(0, 340, TwoPaneSplitViewOrientation.Horizontal) { style = { flexGrow = 1 } };
             split.AddToClassList("gt-split");
             split.Add(treePanel);
             split.Add(tablePanel);
