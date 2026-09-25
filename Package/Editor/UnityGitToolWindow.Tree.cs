@@ -110,7 +110,7 @@ namespace UnityGitTool
             return row;
         }
 
-        private static void BindTreeRow(VisualElement element, MockNode node)
+        private void BindTreeRow(VisualElement element, MockNode node)
         {
             var typeIcon = (Image)element[0];
             var label = (Label)element[1];
@@ -127,7 +127,7 @@ namespace UnityGitTool
                 _ => "cs Script Icon",
             });
             label.text = node.Label;
-            conflictIcon.style.display = node.HasConflict ? DisplayStyle.Flex : DisplayStyle.None;
+            conflictIcon.style.display = _isMerge && node.HasConflict ? DisplayStyle.Flex : DisplayStyle.None;
 
             badgeLabel.style.display = node.Badge == MockBadge.None ? DisplayStyle.None : DisplayStyle.Flex;
             badgeLabel.text = node.Badge switch

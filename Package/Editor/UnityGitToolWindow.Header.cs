@@ -70,10 +70,15 @@ namespace UnityGitTool
             // previewing a hypothetical merge without actually being mid-merge.
             void SetMode(bool isMerge)
             {
+                _isMerge = isMerge;
                 _columnResult.visible = isMerge;
                 _columnActions.visible = isMerge;
                 diffModeButton.EnableInClassList("gt-toggle-chip-active", !isMerge);
                 mergeModeButton.EnableInClassList("gt-toggle-chip-active", isMerge);
+                // Conflict warning icons (property rows, tree nodes) only mean something in Merge
+                // mode — re-bind visible items so they pick up the new _isMerge value immediately.
+                _table.RefreshItems();
+                _tree.RefreshItems();
             }
             SetMode(isMerge: false);
 

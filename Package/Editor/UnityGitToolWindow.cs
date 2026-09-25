@@ -24,6 +24,11 @@ namespace UnityGitTool
         private Column _columnActions;
         private List<MockRow> _currentRows = new();
         private bool _onlyConflicts;
+        // Diff vs Merge (see Header.cs's SetMode). A conflict warning only means something once
+        // there's a Result to pick — in plain Diff mode every differing field would show one (no
+        // 3-way base to tell an auto-mergeable change from a real conflict, see UnityYamlDiffBuilder),
+        // which reads as noise rather than a signal. Tree/table icons check this before showing.
+        private bool _isMerge;
         private Label _statusLabel;
 
         private const string WorkingTree = GitFileReader.WorkingTree;

@@ -67,7 +67,7 @@ namespace UnityGitTool
                     var data = row[index];
                     var warnIcon = (Image)element[0];
                     var label = (Label)element[1];
-                    warnIcon.style.display = data.IsConflict ? DisplayStyle.Flex : DisplayStyle.None;
+                    warnIcon.style.display = _isMerge && data.IsConflict ? DisplayStyle.Flex : DisplayStyle.None;
                     label.text = data.Property;
                 },
             };
