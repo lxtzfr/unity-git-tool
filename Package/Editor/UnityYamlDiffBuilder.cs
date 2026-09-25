@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using UnityEditor;
+using UnityEngine;
 using UnityEngine.UIElements;
 
 namespace UnityGitTool
@@ -64,6 +65,7 @@ namespace UnityGitTool
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
             Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
             string label,
             string filePath,
             MockNodeKind fileKind,
@@ -122,7 +124,7 @@ namespace UnityGitTool
 
             var children = included
                 .Where(id => parentOf.GetValueOrDefault(id, 0) == 0)
-                .Select(rootId => BuildGameObjectSubtree(rootId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline))
+                .Select(rootId => BuildGameObjectSubtree(rootId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath))
                 .ToList();
 
             var nodeId = nextId();
@@ -132,6 +134,7 @@ namespace UnityGitTool
             // OwnRowsByNodeId entry of its own: a file is never shown in the table directly (see
             // UnityGitToolWindow.Tree.cs), only acted on via Apply.
             rowsByNodeId[nodeId] = children.SelectMany(c => rowsByNodeId.GetValueOrDefault(c.id) ?? new List<MockRow>()).ToList();
+            gameObjectNodesByNodeId[nodeId] = children.SelectMany(c => gameObjectNodesByNodeId.GetValueOrDefault(c.id) ?? new List<MockNode>()).ToList();
             var fileNode = new MockNode
             {
                 Id = nodeId,
@@ -149,7 +152,7 @@ namespace UnityGitTool
         /// sentinel) at the scene root or when anything along the chain can't be resolved. Prefers B
         /// (the incoming/current side) for structure, falling back to A only where B doesn't have the
         /// object at all (added-in-A-only, i.e. removed on B).</summary>
-        private static long GetParentGameObjectId(long gameObjectId, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        internal static long GetParentGameObjectId(long gameObjectId, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
         {
             var transformId = FindTransformId(gameObjectId, byIdB) ?? FindTransformId(gameObjectId, byIdA);
             if (transformId == null) return 0;
@@ -168,7 +171,7 @@ namespace UnityGitTool
             return ownerId;
         }
 
-        private static long? FindTransformId(long gameObjectId, Dictionary<long, GitYamlDocument> byId)
+        internal static long? FindTransformId(long gameObjectId, Dictionary<long, GitYamlDocument> byId)
         {
             if (!byId.TryGetValue(gameObjectId, out var gameObject)) return null;
             foreach (var compId in CollectComponentIds(gameObject))
@@ -218,10 +221,12 @@ namespace UnityGitTool
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
             Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
             Dictionary<long, GitYamlDocument> byIdA,
             Dictionary<long, GitYamlDocument> byIdB,
             bool fileIsConflicted,
-            bool bIsOlderBaseline)
+            bool bIsOlderBaseline,
+            string filePath)
         {
             byIdA.TryGetValue(id, out var goA);
             byIdB.TryGetValue(id, out var goB);
@@ -229,13 +234,13 @@ namespace UnityGitTool
             var childItems = new List<TreeViewItemData<MockNode>>();
             if (childrenOf.TryGetValue(id, out var childIds))
                 foreach (var childId in childIds)
-                    childItems.Add(BuildGameObjectSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline));
+                    childItems.Add(BuildGameObjectSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath));
 
             // Write-back only ever patches revision A's own file (see UnityYamlWriter) — a row whose
             // object doesn't exist on the A side at all (FileId 0, Unity's own "no reference" sentinel,
             // safe to reuse since a real document never has it) has nothing to splice into; it's
             // filtered out at apply time instead of guessed at.
-            var ownRows = DiffFields(goA?.FileId ?? 0, goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
+            var ownRows = DiffFields(goA?.FileId ?? 0, goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, typeof(GameObject));
 
             var componentIds = CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct();
             var anyComponentChanged = false;
@@ -251,6 +256,9 @@ namespace UnityGitTool
             }
 
             var badge = ResolveBadge(goA, goB, ownRows.Count > 0 || anyComponentChanged, bIsOlderBaseline);
+            var (headerStateA, headerStateB) = badge == MockBadge.None
+                ? (MockHeaderState.None, MockHeaderState.None)
+                : ResolveHeaderStates(goA == null, goB == null, bIsOlderBaseline);
             var label = (goB ?? goA)?.Fields.GetValueOrDefault("m_Name") as string ?? "GameObject";
 
             var nodeId = nextId();
@@ -265,9 +273,19 @@ namespace UnityGitTool
                 Id = nodeId,
                 Label = label,
                 Kind = MockNodeKind.GameObject,
+                FilePath = filePath,
+                FileId = id,
                 Badge = badge,
+                HeaderStateA = headerStateA,
+                HeaderStateB = headerStateB,
                 HasConflict = ownRows.Exists(r => r.IsConflict) || childItems.Any(c => c.data.HasConflict),
             };
+            // Same aggregation idea as rowsByNodeId above: this node plus every descendant's own list,
+            // so a file node's entry (built the same way one level up in BuildFileNode) ends up with
+            // every GameObject in the file, not just its direct roots.
+            gameObjectNodesByNodeId[nodeId] = new List<MockNode> { node }
+                .Concat(childItems.SelectMany(c => gameObjectNodesByNodeId.GetValueOrDefault(c.id) ?? new List<MockNode>()))
+                .ToList();
             return new TreeViewItemData<MockNode>(nodeId, node, childItems);
         }
 
@@ -291,18 +309,24 @@ namespace UnityGitTool
             // class name lives in m_Script (a MonoScript asset reference), same as Unity's own
             // Inspector title bar resolves it, not the generic type tag.
             var label = typeName == "MonoBehaviour" ? ResolveScriptLabel(compB ?? compA) : typeName;
+            var componentType = ResolveComponentType(typeName, compB ?? compA);
 
-            var fieldRows = DiffFields(compA?.FileId ?? 0, compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
+            var fieldRows = DiffFields(compA?.FileId ?? 0, compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, componentType);
             changed = compA == null || compB == null || fieldRows.Count > 0;
             if (!changed) return fieldRows;
 
-            // Added/removed components mark themselves in the header rather than needing a synthetic
-            // field row below it (which had nothing real to show when every field was ignored anyway).
-            // See BuildFileNode's doc comment for bIsOlderBaseline — same Added/Removed direction flip.
-            var isAdded = bIsOlderBaseline ? compB == null : compA == null;
-            var isRemoved = bIsOlderBaseline ? compA == null : compB == null;
-            var headerLabel = isAdded ? $"{label} (added)" : isRemoved ? $"{label} (removed)" : label;
-            var rows = new List<MockRow> { new() { IsHeader = true, Property = headerLabel, HeaderIcon = IconForComponentType(typeName) } };
+            // Added/removed/modified already reads from the A/B columns' own state text (see
+            // ResolveHeaderStates / UnityGitToolWindow.Table.cs's BindHeaderValueCell) — colored green/
+            // red there, so repeating it as "(added)"/"(removed)" in the Property column's plain label
+            // would just be the same fact said twice.
+            var (headerStateA, headerStateB) = ResolveHeaderStates(compA == null, compB == null, bIsOlderBaseline);
+            // FileId here is the component's OWN id (unlike a field row's, its owning object's) — a
+            // "Delete Component" click on this row needs to know what to remove. Always compA's, not
+            // affected by bIsOlderBaseline (that only flips which HeaderState reads as Added/Deleted):
+            // write-back always patches A's own file (see UnityYamlWriter) regardless of which side
+            // reads as "older" for display — a component only on B has nothing there yet to delete
+            // (FileId 0).
+            var rows = new List<MockRow> { new() { IsHeader = true, Property = label, HeaderIcon = IconForComponentType(typeName), FileId = compA?.FileId ?? 0, HeaderStateA = headerStateA, HeaderStateB = headerStateB } };
             rows.AddRange(fieldRows);
             return rows;
         }
@@ -342,6 +366,57 @@ namespace UnityGitTool
             return "MonoBehaviour";
         }
 
+        /// <summary>Best-effort assembly-qualified locations to try for a built-in engine component's
+        /// C# type (see <see cref="ResolveComponentType"/>) — Unity splits its runtime across several
+        /// modules, and the YAML type tag carries no assembly info, only the bare class name. Checked
+        /// in order; the first hit wins. Not exhaustive — a type from a module not listed here (or a
+        /// third-party package) just means <see cref="ResolveComponentType"/> returns null, same as
+        /// today's plain-int display for that field (see <see cref="UnityYamlValueConverter.ToScalar"/>).</summary>
+        private static readonly (string Namespace, string Assembly)[] BuiltInTypeLocations =
+        {
+            ("UnityEngine", "UnityEngine.CoreModule"),
+            ("UnityEngine.UI", "UnityEngine.UI"),
+            ("UnityEngine.EventSystems", "UnityEngine.UI"),
+            ("UnityEngine.Rendering", "UnityEngine.CoreModule"),
+            ("UnityEngine.Audio", "UnityEngine.AudioModule"),
+            ("UnityEngine.Animations", "UnityEngine.AnimationModule"),
+            ("UnityEngine.Video", "UnityEngine.VideoModule"),
+            ("UnityEngine.Playables", "UnityEngine.CoreModule"),
+            ("UnityEngine.Timeline", "Unity.Timeline"),
+        };
+
+        /// <summary>Resolves a component document's real C# <see cref="System.Type"/> — a MonoBehaviour
+        /// via its m_Script reference (same lookup as <see cref="ResolveScriptLabel"/>, kept separate
+        /// rather than sharing code so a change to one's fallback behavior can't silently affect the
+        /// other), a built-in engine component via <see cref="BuiltInTypeLocations"/>. Used by
+        /// <see cref="UnityYamlValueConverter"/> to tell an enum-backed int field from a plain one —
+        /// see <see cref="DiffFields"/>'s <c>declaringType</c> parameter. Best-effort: returns null
+        /// (silently — the field just displays as a plain int, no worse than before this existed) when
+        /// the class can't be loaded (compile error, missing script) or isn't in any listed module.</summary>
+        internal static System.Type ResolveComponentType(string typeName, GitYamlDocument component)
+        {
+            if (typeName == "MonoBehaviour")
+            {
+                if (component != null &&
+                    component.Fields.TryGetValue("m_Script", out var scriptRef) &&
+                    scriptRef is Dictionary<string, object> scriptMap &&
+                    scriptMap.TryGetValue("guid", out var guidValue) && guidValue is string guid)
+                {
+                    var path = AssetDatabase.GUIDToAssetPath(guid);
+                    if (!string.IsNullOrEmpty(path))
+                        return AssetDatabase.LoadAssetAtPath<MonoScript>(path)?.GetClass();
+                }
+                return null;
+            }
+
+            foreach (var (ns, assembly) in BuiltInTypeLocations)
+            {
+                var type = System.Type.GetType($"{ns}.{typeName}, {assembly}");
+                if (type != null) return type;
+            }
+            return null;
+        }
+
         /// <summary>See <see cref="BuildFileNode"/>'s doc comment for what <paramref name="bIsOlderBaseline"/>
         /// means and when it's true.</summary>
         private static MockBadge ResolveBadge(GitYamlDocument a, GitYamlDocument b, bool hasChanges, bool bIsOlderBaseline)
@@ -351,7 +426,33 @@ namespace UnityGitTool
             return hasChanges ? MockBadge.Modified : MockBadge.None;
         }
 
-        private static Dictionary<long, GitYamlDocument> IndexByFileId(List<GitYamlDocument> documents)
+        /// <summary>Per-column (A vs B) status for a header row (see <see cref="MockHeaderState"/>).
+        /// Neither side missing (both exist, a field differs) reads as Modified on both. Otherwise,
+        /// which physical side is "added going forward" vs "removed going forward" flips with
+        /// <paramref name="bIsOlderBaseline"/>, the same flip <see cref="ResolveBadge"/>/
+        /// <c>GetStatusColor</c> apply (see their doc comments) since "missing from A" only means
+        /// "added" when B is the newer side:
+        /// <list type="bullet">
+        /// <item>added — the side that doesn't have it yet is just Missing (grey): nothing was
+        /// removed, it simply doesn't exist there yet. The side that does have it reads Added
+        /// (green).</item>
+        /// <item>removed — the side about to lose it reads Deleted (red), the signal actually worth
+        /// surfacing. The side that still has it (its own, older revision) has nothing wrong to
+        /// report about itself, so it reads None (nothing shown) rather than a stale "Deleted" next
+        /// to a value that's perfectly intact on that side.</item>
+        /// </list></summary>
+        private static (MockHeaderState A, MockHeaderState B) ResolveHeaderStates(bool missingA, bool missingB, bool bIsOlderBaseline)
+        {
+            if (!missingA && !missingB) return (MockHeaderState.Modified, MockHeaderState.Modified);
+
+            var isAdded = bIsOlderBaseline ? missingB : missingA;
+            if (isAdded)
+                return missingA ? (MockHeaderState.Missing, MockHeaderState.Added) : (MockHeaderState.Added, MockHeaderState.Missing);
+
+            return missingA ? (MockHeaderState.Deleted, MockHeaderState.None) : (MockHeaderState.None, MockHeaderState.Deleted);
+        }
+
+        internal static Dictionary<long, GitYamlDocument> IndexByFileId(List<GitYamlDocument> documents)
         {
             var byId = new Dictionary<long, GitYamlDocument>();
             foreach (var document in documents)
@@ -360,7 +461,7 @@ namespace UnityGitTool
             return byId;
         }
 
-        private static IEnumerable<long> CollectComponentIds(GitYamlDocument gameObject)
+        internal static IEnumerable<long> CollectComponentIds(GitYamlDocument gameObject)
         {
             if (gameObject == null || !gameObject.Fields.TryGetValue("m_Component", out var raw) || raw is not List<object> entries)
                 yield break;
@@ -382,7 +483,8 @@ namespace UnityGitTool
             Dictionary<long, GitYamlDocument> byIdA,
             Dictionary<long, GitYamlDocument> byIdB,
             bool fileIsConflicted,
-            bool bIsOlderBaseline = false)
+            bool bIsOlderBaseline = false,
+            System.Type declaringType = null)
         {
             var rows = new List<MockRow>();
             var keys = (fieldsA?.Keys ?? Enumerable.Empty<string>()).Concat(fieldsB?.Keys ?? Enumerable.Empty<string>()).Distinct();
@@ -407,15 +509,15 @@ namespace UnityGitTool
                     FileId = fileId,
                     Key = key,
                     BIsOlderBaseline = bIsOlderBaseline,
-                    ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA, byIdA) : null,
-                    ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB, byIdB) : null,
+                    ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA, byIdA, key, declaringType) : null,
+                    ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB, byIdB, key, declaringType) : null,
                     IsConflict = isConflict,
                     // Only one side to pick when it's not a conflict — auto-resolves to whichever side
                     // has the field, same value MockRow.Result gets below. See MockResolution: this is
                     // what UnityGitToolWindow.Table.cs's Take A/B/Revert buttons and the Result field's
                     // own inline edit callback (Manual) go on to overwrite.
                     Resolution = isConflict ? MockResolution.Unresolved : hasA ? MockResolution.A : MockResolution.B,
-                    Result = isConflict ? null : UnityYamlValueConverter.ToDisplayValue(hasA ? rawA : rawB, hasA ? byIdA : byIdB),
+                    Result = isConflict ? null : UnityYamlValueConverter.ToDisplayValue(hasA ? rawA : rawB, hasA ? byIdA : byIdB, key, declaringType),
                 });
             }
             return rows;

@@ -7,47 +7,97 @@ using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>Left panel: the files > GameObjects/documents > components tree.</summary>
+    /// <summary>Left panel: the files > GameObjects/documents > components tree. A second instance
+    /// of this same tree (see <see cref="_resultTree"/>) sits to the right of the table, previewing
+    /// the resolved hierarchy — both are built from the exact same <c>roots</c> data
+    /// (<see cref="RefreshTree"/> populates both in one pass) and kept in sync by selection (see
+    /// <see cref="SyncTreeSelection"/>), so either one can be used to navigate.</summary>
     public partial class UnityGitToolWindow
     {
         private TreeView _tree;
+        private TreeView _resultTree;
+        // Re-entrancy guard for SyncTreeSelection: setting one tree's selection from the other's
+        // selectionChanged handler would otherwise fire that tree's own selectionChanged right back,
+        // ping-ponging forever.
+        private bool _syncingTreeSelection;
 
-        private VisualElement BuildTreePanel()
+        private VisualElement BuildTreePanel(string title, bool isResultTree, out TreeView treeView)
         {
             var pane = new VisualElement { style = { flexGrow = 1 } };
-            pane.Add(BuildPanelTitle("Files"));
+            pane.Add(BuildPanelTitle(title));
 
-            _tree = new TreeView
+            var tree = new TreeView
             {
                 fixedItemHeight = 24,
                 showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
                 makeItem = BuildTreeRow,
             };
-            _tree.AddToClassList("gt-tree");
-            _tree.bindItem = (element, index) =>
-            {
-                var node = _tree.GetItemDataForIndex<MockNode>(index);
-                BindTreeRow(element, node);
-            };
-            _tree.selectionChanged += selection =>
-            {
-                if (selection.FirstOrDefault() is not MockNode node) return;
-                _selectedNode = node;
-                // OwnRowsByNodeId, not RowsByNodeId — a file node's (and an ancestor GameObject's)
-                // RowsByNodeId entry aggregates every descendant's rows too (see BuildFileNode /
-                // BuildGameObjectSubtree), which is what ApplyResolution needs but would otherwise
-                // make a child GameObject's own components read as if they belonged to its parent,
-                // just because the parent happens to be selected. The table only ever shows a node's
-                // own rows — selecting a file, or a GameObject that's only a structural ancestor of
-                // the real change, shows nothing until you drill into the actual changed object.
-                _currentRows = node.Kind == MockNodeKind.GameObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows)
-                    ? rows
-                    : new List<MockRow>();
-                RefreshTable();
-            };
-            RefreshTree();
-            pane.Add(_tree);
+            tree.AddToClassList("gt-tree");
+            tree.bindItem = (element, index) => BindTreeRow(element, tree.GetItemDataForIndex<MockNode>(index), isResultTree);
+            tree.selectionChanged += selection => OnTreeSelectionChanged(tree, selection);
+            pane.Add(tree);
+            treeView = tree;
             return pane;
+        }
+
+        /// <summary>Selecting a node in either tree selects the same node (by id — both trees share
+        /// the same <c>roots</c>, so ids line up) in the other one too, and refreshes the table off
+        /// it — see <see cref="_syncingTreeSelection"/> for why the propagated call doesn't loop.</summary>
+        private void OnTreeSelectionChanged(TreeView source, IEnumerable<object> selection)
+        {
+            if (_syncingTreeSelection) return;
+            if (selection.FirstOrDefault() is not MockNode node) return;
+
+            _selectedNode = node;
+            // OwnRowsByNodeId, not RowsByNodeId — a file node's (and an ancestor GameObject's)
+            // RowsByNodeId entry aggregates every descendant's rows too (see BuildFileNode /
+            // BuildGameObjectSubtree), which is what ApplyResolution needs but would otherwise
+            // make a child GameObject's own components read as if they belonged to its parent,
+            // just because the parent happens to be selected. The table only ever shows a node's
+            // own rows — selecting a file, or a GameObject that's only a structural ancestor of
+            // the real change, shows nothing until you drill into the actual changed object.
+            if (node.Kind == MockNodeKind.GameObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
+            {
+                // A synthetic header row for the GameObject itself — carries "Delete GameObject" (see
+                // Table.cs), same idea as a component's own header row but for the object as a whole,
+                // which otherwise has no row of its own to hang that action on.
+                var gameObjectHeader = new MockRow
+                {
+                    IsHeader = true, Property = node.Label, HeaderIcon = "GameObject Icon", GameObjectNode = node,
+                    HeaderStateA = node.HeaderStateA, HeaderStateB = node.HeaderStateB,
+                };
+                _currentRows = new List<MockRow> { gameObjectHeader };
+                _currentRows.AddRange(rows);
+
+                // Each field row's OwnerHeaderRow is whichever header (this GameObject's own, or the
+                // most recent component header) it fell under. A component header row also gets its
+                // OwnerHeaderRow set — to the GameObject header, always — so that deleting the whole
+                // GameObject is reflected on its component headers too, not just its own row (see
+                // MockRow.OwnerHeaderRow / IsMarkedForDeletion).
+                var currentHeader = gameObjectHeader;
+                foreach (var row in _currentRows)
+                {
+                    if (row == gameObjectHeader) continue; // the root header has no owner of its own
+                    if (row.IsHeader)
+                    {
+                        row.OwnerHeaderRow = gameObjectHeader;
+                        currentHeader = row;
+                        continue;
+                    }
+                    row.OwnerHeaderRow = currentHeader;
+                }
+            }
+            else
+            {
+                _currentRows = new List<MockRow>();
+            }
+            RefreshTable();
+
+            var other = source == _tree ? _resultTree : _tree;
+            if (other == null) return;
+            _syncingTreeSelection = true;
+            try { other.SetSelectionById(node.Id); }
+            finally { _syncingTreeSelection = false; }
         }
 
         /// <summary>Rebuilds the left tree. When A is Working Tree (the merge/rebase-resolution case —
@@ -69,6 +119,7 @@ namespace UnityGitTool
         {
             MockDataSource.RowsByNodeId.Clear();
             MockDataSource.OwnRowsByNodeId.Clear();
+            MockDataSource.GameObjectNodesByNodeId.Clear();
             _currentRows = new List<MockRow>();
             _selectedNode = null;
 
@@ -137,13 +188,22 @@ namespace UnityGitTool
                 var contentB = GitFileReader.ReadFileAtRevision(contentRevisionB, file.Path);
 
                 roots.Add(UnityYamlDiffBuilder.BuildFileNode(
-                    NextId, MockDataSource.RowsByNodeId, MockDataSource.OwnRowsByNodeId, Path.GetFileName(file.Path), file.Path, kind, badge,
-                    contentA, contentB, fileIsConflicted, bIsOlderBaseline));
+                    NextId, MockDataSource.RowsByNodeId, MockDataSource.OwnRowsByNodeId, MockDataSource.GameObjectNodesByNodeId,
+                    Path.GetFileName(file.Path), file.Path, kind, badge, contentA, contentB, fileIsConflicted, bIsOlderBaseline));
             }
 
+            // Same `roots` data bound to both trees — see the class header for why: they share ids,
+            // so selection syncs by id and a build-once diff isn't duplicated per tree. _resultTree is
+            // null outside Merge mode (see UnityGitToolWindow.cs's CreateGUI) — nothing to preview.
             _tree.SetRootItems(roots);
             _tree.Rebuild();
             _tree.ExpandRootItems();
+            if (_resultTree != null)
+            {
+                _resultTree.SetRootItems(roots);
+                _resultTree.Rebuild();
+                _resultTree.ExpandRootItems();
+            }
             RefreshTable();
         }
 
@@ -173,7 +233,19 @@ namespace UnityGitTool
             return row;
         }
 
-        private void BindTreeRow(VisualElement element, MockNode node)
+        /// <summary>Shared binder for both trees (see the class header), but the two read differently:
+        /// the Files tree is a plain git-status view, so it keeps the A/M/D chip; the Result tree is a
+        /// preview of the merge outcome, where a same-meaning chip sitting next to a name that's
+        /// ALSO turning red on delete read as two overlapping signals for one thing — collapsed here
+        /// into one: the name itself carries the color (green/orange/red for Added/Modified/Deleted,
+        /// <see cref="MockNode.MarkedForDeletion"/> forcing red regardless of the underlying badge since
+        /// that's the more final of the two), chip hidden entirely. A deleted node's label reads
+        /// struck-through rather than disappearing — it's still shown (and still selectable) until
+        /// Apply actually removes it from the file. No delete button here in either tree — "Delete
+        /// GameObject" lives on the synthetic header row the table prepends when this node is selected
+        /// (see OnTreeSelectionChanged / UnityGitToolWindow.Table.cs), so this method is the only thing
+        /// that needs to react to MarkedForDeletion changing.</summary>
+        private void BindTreeRow(VisualElement element, MockNode node, bool isResultTree)
         {
             var typeIcon = (Image)element[0];
             var label = (Label)element[1];
@@ -188,6 +260,25 @@ namespace UnityGitTool
             });
             label.text = node.Label;
             conflictIcon.style.display = _isMerge && node.HasConflict ? DisplayStyle.Flex : DisplayStyle.None;
+
+            if (isResultTree)
+            {
+                badgeLabel.style.display = DisplayStyle.None;
+                label.RemoveFromClassList("gt-tree-label-deleted"); // opacity dimming isn't used here — color alone carries the state
+                var stateColor = node.MarkedForDeletion ? BadgeRed : node.Badge switch
+                {
+                    MockBadge.Added => BadgeGreen,
+                    MockBadge.Removed => BadgeRed,
+                    MockBadge.Modified => BadgeOrange,
+                    _ => (Color?)null,
+                };
+                if (stateColor.HasValue) label.style.color = stateColor.Value;
+                else label.style.color = StyleKeyword.Null;
+                return;
+            }
+
+            label.style.color = StyleKeyword.Null;
+            label.EnableInClassList("gt-tree-label-deleted", node.MarkedForDeletion);
 
             badgeLabel.style.display = node.Badge == MockBadge.None ? DisplayStyle.None : DisplayStyle.Flex;
             badgeLabel.text = node.Badge switch

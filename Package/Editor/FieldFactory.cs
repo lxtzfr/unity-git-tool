@@ -39,6 +39,7 @@ namespace UnityGitTool
                 AnimationCurve curve => new CurveField { value = curve },
                 Gradient g => new GradientField { value = g },
                 LayerMask lm => new LayerMaskField { value = lm.value },
+                RectOffset ro => BuildRectOffsetField(ro, enabled),
                 Enum e => new EnumField(e),
                 float f => new FloatField { value = f },
                 int i => new IntegerField { value = i },
@@ -78,6 +79,30 @@ namespace UnityGitTool
                 case TextField f: f.RegisterValueChangedCallback(e => onValueChanged(e.newValue)); break;
                 case ObjectField f: f.RegisterValueChangedCallback(e => onValueChanged(e.newValue)); break;
             }
+        }
+
+        /// <summary>RectOffset (padding/margin structs on LayoutGroup, Image, ScrollRect, ...) has no
+        /// native UI Toolkit field — rendered as four small labeled IntegerFields (L/R/T/B) instead of
+        /// Unity's own flat "m_Left: 2, m_Right: 0, ..." text, same idea as Vector3Field breaking a
+        /// struct into its named components. Read-only in practice like <see cref="BuildArrayBlock"/>
+        /// — <see cref="WireChangeCallback"/> has no case for a plain container, so edits here don't
+        /// propagate back to the model even when <paramref name="enabled"/> is true.</summary>
+        private static VisualElement BuildRectOffsetField(RectOffset ro, bool enabled)
+        {
+            var container = new VisualElement();
+            container.AddToClassList("gt-rectoffset-field");
+            void AddAxis(string label, int value)
+            {
+                var axis = new IntegerField(label) { value = value };
+                axis.SetEnabled(enabled);
+                axis.AddToClassList("gt-rectoffset-axis");
+                container.Add(axis);
+            }
+            AddAxis("L", ro.left);
+            AddAxis("R", ro.right);
+            AddAxis("T", ro.top);
+            AddAxis("B", ro.bottom);
+            return container;
         }
 
         /// <summary>Arrays/lists render as a stacked block of "[i] &lt;field&gt;" rows, same idea as

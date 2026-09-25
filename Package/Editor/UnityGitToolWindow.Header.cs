@@ -3,7 +3,7 @@ using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>Toolbar: revision pickers (A/B), manual refresh, Diff/Merge mode.</summary>
+    /// <summary>Toolbar: revision pickers (A/B), manual refresh.</summary>
     public partial class UnityGitToolWindow
     {
         private VisualElement BuildHeader()
@@ -42,10 +42,19 @@ namespace UnityGitTool
             UpdateColumnHeaders(_revisionA, _revisionB);
 
             // The diff already re-runs automatically when A or B changes (see BuildRevisionMenu) —
-            // this is only for re-syncing against the *same* selection, e.g. new commits landed on
-            // the branch you're already comparing against.
+            // this is mainly for re-syncing against the *same* selection (e.g. new commits landed on
+            // the branch you're already comparing against), but it also re-checks whether a
+            // merge/rebase/cherry-pick/revert started or finished outside this tool since it opened
+            // (see DetectAndApplyConflictState) — if that flips _isMerge, the whole layout (single vs
+            // dual tree, Result column or not — see CreateGUI) needs rebuilding, not just a data refresh.
             var refresh = new Button(() =>
             {
+                if (DetectAndApplyConflictState())
+                {
+                    rootVisualElement.Clear();
+                    CreateGUI();
+                    return;
+                }
                 RunDiff();
                 RefreshTree();
             })
@@ -53,79 +62,8 @@ namespace UnityGitTool
             refresh.AddToClassList("gt-pill");
             refresh.tooltip = "Re-run the diff without changing the selection";
 
-            var modeGroup = new VisualElement();
-            modeGroup.AddToClassList("gt-filter-group");
-            Button diffModeButton = null;
-            Button mergeModeButton = null;
-            diffModeButton = new Button(() => SetMode(isMerge: false)) { text = "Diff" };
-            mergeModeButton = new Button(() => SetMode(isMerge: true)) { text = "Merge" };
-            diffModeButton.AddToClassList("gt-pill");
-            mergeModeButton.AddToClassList("gt-pill");
-            modeGroup.Add(diffModeButton);
-            modeGroup.Add(mergeModeButton);
-
-            // Manual by default; "Auto-config merge branches" below flips this to Merge automatically
-            // when a real merge is in progress. These two buttons stay as the override for previewing
-            // a hypothetical merge (any A/B pair) without actually being mid-merge.
-            void SetMode(bool isMerge)
-            {
-                _isMerge = isMerge;
-                _columnResult.visible = isMerge;
-                _columnActions.visible = isMerge;
-                diffModeButton.EnableInClassList("gt-toggle-chip-active", !isMerge);
-                mergeModeButton.EnableInClassList("gt-toggle-chip-active", isMerge);
-                // Conflict warning icons (property rows, tree nodes) only mean something in Merge
-                // mode — re-bind visible items so they pick up the new _isMerge value immediately.
-                _table.RefreshItems();
-                _tree.RefreshItems();
-            }
-            SetMode(isMerge: false);
-
-            // One-click stand-in for "config auto les branches en merge conflict": detects whichever
-            // of merge/rebase/cherry-pick/revert is stopped on conflicts and points A/B at Working Tree
-            // (yours) / that operation's conflict ref (theirs) — real refs, so
-            // GetChangedFiles/ReadFileAtRevision need no special-casing — then flips to Merge mode.
-            var autoConfig = new Button(() =>
-            {
-                var (kind, conflictRef) = GitFileReader.DetectConflict();
-                if (kind == GitConflictKind.None)
-                {
-                    SetStatus("No merge/rebase/cherry-pick/revert in progress — nothing to auto-configure.");
-                    return;
-                }
-                // Working Tree rather than "HEAD" for A: byte-identical to HEAD right now (git leaves
-                // the working copy untouched until something resolves the conflict), but Working Tree
-                // is what ApplyResolution actually reads/patches/writes — using it here means the tool
-                // is already pointed at a file Apply can act on, no extra step needed.
-                _revisionA = WorkingTree;
-                _revisionB = conflictRef;
-                menuA.text = _revisionA;
-                menuB.text = _revisionB;
-                UpdateColumnHeaders(_revisionA, _revisionB);
-                SetMode(isMerge: true);
-                SetStatus($"{kind} in progress: Working Tree vs {GitFileReader.GetRefDisplayName(conflictRef)} ({conflictRef})");
-                RunDiff();
-                RefreshTree();
-                _table.RefreshItems();
-            })
-            { text = "Auto-config merge branches" };
-            autoConfig.AddToClassList("gt-pill");
-            autoConfig.style.marginRight = 8;
-            autoConfig.tooltip = "Detect an in-progress merge/rebase/cherry-pick/revert and set A/B to HEAD / the conflict ref";
-
-            // Writes the selected file's resolved fields back to disk and stages it — see
-            // UnityGitToolWindow.Apply.cs. Only meaningful once A is Working Tree (Auto-config above
-            // sets it) and a whole file (not just one GameObject) is selected in the tree.
-            var apply = new Button(ApplyResolution) { text = "Apply resolution" };
-            apply.AddToClassList("gt-pill");
-            apply.style.marginRight = 8;
-            apply.tooltip = "Write the selected file's resolved fields to the working tree and `git add` it";
-
             toolbar.Add(revisionGroup);
             toolbar.Add(refresh);
-            toolbar.Add(autoConfig);
-            toolbar.Add(apply);
-            toolbar.Add(modeGroup);
             var spacer = new VisualElement();
             spacer.AddToClassList("gt-flex-spacer");
             toolbar.Add(spacer);
@@ -168,11 +106,16 @@ namespace UnityGitTool
             return menu;
         }
 
+        /// <summary>"(Yours)"/"(Theirs)" is git's own merge-conflict convention (<c>git checkout
+        /// --ours/--theirs</c>) — meaningful only in Merge mode, where A/B really are the two sides of
+        /// a real conflict (see DetectAndApplyConflictState). Outside it, A/B are just two arbitrary
+        /// revisions the user picked to browse — labeling them "Yours"/"Theirs" would claim a
+        /// relationship that isn't there, so the column just shows the revision name.</summary>
         private void UpdateColumnHeaders(string revisionA, string revisionB)
         {
             if (_columnA == null || _columnB == null) return;
-            _columnA.title = $"{revisionA} (Yours)";
-            _columnB.title = $"{revisionB} (Theirs)";
+            _columnA.title = _isMerge ? $"{revisionA} (Yours)" : revisionA;
+            _columnB.title = _isMerge ? $"{revisionB} (Theirs)" : revisionB;
         }
     }
 }

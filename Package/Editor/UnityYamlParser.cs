@@ -34,6 +34,13 @@ namespace UnityGitTool
         /// a YAML mapping has no semantic meaning to Unity, so appending instead of preserving the
         /// other side's original position is safe.</summary>
         public int BodyEndLine;
+
+        /// <summary>Line index of this document's own `--- !u!&lt;classId&gt; &amp;&lt;fileId&gt;`
+        /// header — together with <see cref="BodyEndLine"/>, the document's whole span
+        /// [<see cref="HeaderLine"/>, <see cref="BodyEndLine"/>) that <see cref="UnityYamlWriter"/>
+        /// removes entirely to delete this object (a whole GameObject or component, not just one of
+        /// its fields).</summary>
+        public int HeaderLine;
     }
 
     /// <summary>A half-open source-line range: <see cref="Start"/> inclusive, <see cref="End"/>
@@ -75,6 +82,7 @@ namespace UnityGitTool
                     ClassId = int.Parse(header.Groups[1].Value),
                     FileId = long.Parse(header.Groups[2].Value),
                     Stripped = header.Groups[3].Success,
+                    HeaderLine = index,
                 };
                 index++;
 

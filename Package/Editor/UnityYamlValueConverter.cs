@@ -21,15 +21,19 @@ namespace UnityGitTool
         /// <summary><paramref name="byId"/>, when given, resolves a local `{fileID: N}` reference (no
         /// guid — points at another object in this same file/revision) to that object's name/type
         /// instead of a bare number. Must be the byId map for the SAME side (A or B) this value came
-        /// from — a fileID is only meaningful within its own revision's document graph.</summary>
-        public static object ToDisplayValue(object raw, Dictionary<long, GitYamlDocument> byId = null)
+        /// from — a fileID is only meaningful within its own revision's document graph.
+        /// <paramref name="fieldKey"/>/<paramref name="declaringType"/>, when both given, let a plain
+        /// integer scalar resolve to its real enum value (see <see cref="ToScalar"/>) instead of a bare
+        /// number — YAML carries no type info of its own, so this is the only way to tell "this int IS
+        /// an enum" from "this int is just a count".</summary>
+        public static object ToDisplayValue(object raw, Dictionary<long, GitYamlDocument> byId = null, string fieldKey = null, System.Type declaringType = null)
         {
             switch (raw)
             {
                 case null:
                     return null;
                 case string s:
-                    return ToScalar(s);
+                    return ToScalar(s, fieldKey, declaringType);
                 case Dictionary<string, object> map:
                     return ToStructured(map, byId);
                 case List<object> list:
@@ -39,11 +43,31 @@ namespace UnityGitTool
             }
         }
 
-        private static object ToScalar(string s)
+        private static object ToScalar(string s, string fieldKey, System.Type declaringType)
         {
-            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i)) return i;
+            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var i))
+            {
+                var enumType = ResolveEnumFieldType(fieldKey, declaringType);
+                if (enumType != null) return (System.Enum)System.Enum.ToObject(enumType, i);
+                return i;
+            }
             if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var f)) return f;
             return s;
+        }
+
+        /// <summary>Reflects <paramref name="declaringType"/> (the component's real C# type — see
+        /// <see cref="UnityYamlDiffBuilder.ResolveComponentType"/>) for a field named
+        /// <paramref name="fieldKey"/>, returning its declared type only when that's an enum. Unity
+        /// serializes a `[SerializeField]` private field under its own name verbatim, so a direct
+        /// name lookup (no name-mangling) is correct for both built-in components and MonoBehaviours
+        /// alike. Best-effort: either argument missing, or the field not found (renamed, or this
+        /// component's real type couldn't be resolved at all), just means no enum conversion — the
+        /// caller falls back to a plain int, same as before this existed.</summary>
+        private static System.Type ResolveEnumFieldType(string fieldKey, System.Type declaringType)
+        {
+            if (fieldKey == null || declaringType == null) return null;
+            var field = declaringType.GetField(fieldKey, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+            return field != null && field.FieldType.IsEnum ? field.FieldType : null;
         }
 
         private static object ToStructured(Dictionary<string, object> map, Dictionary<long, GitYamlDocument> byId)
@@ -52,6 +76,11 @@ namespace UnityGitTool
             if (HasKeys(map, "x", "y", "z")) return new Vector3(F(map, "x"), F(map, "y"), F(map, "z"));
             if (HasKeys(map, "x", "y")) return new Vector2(F(map, "x"), F(map, "y"));
             if (HasKeys(map, "r", "g", "b")) return new Color(F(map, "r"), F(map, "g"), F(map, "b"), map.ContainsKey("a") ? F(map, "a") : 1f);
+            // Padding/margin struct (LayoutGroup, Image, ScrollRect, ...) — broken into its four named
+            // axes the same way a Vector3 is, rather than Unity's flat "m_Left: 2, m_Right: 0, ..."
+            // text (see FieldFactory.Create's RectOffset case for the actual four-field rendering).
+            if (HasKeys(map, "m_Left", "m_Right", "m_Top", "m_Bottom"))
+                return new RectOffset((int)F(map, "m_Left"), (int)F(map, "m_Right"), (int)F(map, "m_Top"), (int)F(map, "m_Bottom"));
 
             // A bare `{fileID: N}` (optionally with guid/type) is an asset/object reference.
             if (map.ContainsKey("fileID")) return DescribeReference(map, byId);
