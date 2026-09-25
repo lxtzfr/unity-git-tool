@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using UnityEditor;
 using UnityEngine.UIElements;
 
 namespace UnityGitTool
@@ -146,17 +148,44 @@ namespace UnityGitTool
                 _ => MockNodeKind.ComponentGeneric,
             };
 
+            // "MonoBehaviour" is just the YAML document type for every script component — the actual
+            // class name lives in m_Script (a MonoScript asset reference), same as Unity's own
+            // Inspector title bar resolves it, not the generic type tag.
+            var label = typeName == "MonoBehaviour" ? ResolveScriptLabel(compB ?? compA) : typeName;
+
             var id = nextId();
             rowsByNodeId[id] = rows;
             var node = new MockNode
             {
                 Id = id,
-                Label = typeName,
+                Label = label,
                 Kind = kind,
                 Badge = badge,
                 HasConflict = rows.Exists(r => r.IsConflict),
             };
             return new TreeViewItemData<MockNode>(id, node);
+        }
+
+        /// <summary>Resolves a MonoBehaviour document's m_Script reference to its actual class name
+        /// (e.g. "KioskManager") via the referenced MonoScript asset — falls back to the script
+        /// asset's filename if the class can't be loaded (e.g. a compile error), and to the bare
+        /// "MonoBehaviour" tag if m_Script itself can't be resolved at all (missing script).</summary>
+        private static string ResolveScriptLabel(GitYamlDocument component)
+        {
+            if (component != null &&
+                component.Fields.TryGetValue("m_Script", out var scriptRef) &&
+                scriptRef is Dictionary<string, object> scriptMap &&
+                scriptMap.TryGetValue("guid", out var guidValue) && guidValue is string guid)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!string.IsNullOrEmpty(path))
+                {
+                    var monoScript = AssetDatabase.LoadAssetAtPath<MonoScript>(path);
+                    var scriptClass = monoScript != null ? monoScript.GetClass() : null;
+                    return scriptClass != null ? scriptClass.Name : Path.GetFileNameWithoutExtension(path);
+                }
+            }
+            return "MonoBehaviour";
         }
 
         private static MockBadge ResolveBadge(GitYamlDocument a, GitYamlDocument b, bool hasChanges)
