@@ -89,15 +89,22 @@ namespace UnityGitTool
         {
             // A "stripped" placeholder (see GitYamlDocument.Stripped) has no m_Name/m_GameObject of
             // its own — it's a pointer into a nested prefab instance. Its m_CorrespondingSourceObject
-            // names which prefab asset that real object lives in, so resolve THAT instead of falling
-            // back to a bare "MonoBehaviour"/"Transform" type name with no other context. Loading the
-            // prefab's root as the ObjectField's value isn't the exact sub-object, but it's clickable
-            // and gets the user to the right asset — better than inert text.
+            // (guid + local fileID within that prefab file) is exactly what GlobalObjectId needs to
+            // resolve the EXACT sub-object (identifierType 3 = "source asset object") — not just the
+            // prefab's root — so e.g. a script field pointing at a nested "Body" component resolves
+            // to that Body instance, same as it would in Unity's own Inspector.
             if (document.Stripped &&
                 document.Fields.TryGetValue("m_CorrespondingSourceObject", out var sourceRef) &&
                 sourceRef is Dictionary<string, object> sourceMap &&
                 sourceMap.TryGetValue("guid", out var sourceGuid) && sourceGuid is string guid)
             {
+                var sourceFileId = sourceMap.TryGetValue("fileID", out var sfid) ? sfid as string : null;
+                if (sourceFileId != null && GlobalObjectId.TryParse($"GlobalObjectId_V1-3-{guid}-{sourceFileId}-0", out var goid))
+                {
+                    var precise = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(goid);
+                    if (precise != null) return precise;
+                }
+
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 if (!string.IsNullOrEmpty(path))
                 {
