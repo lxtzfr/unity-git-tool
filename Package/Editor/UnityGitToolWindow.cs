@@ -47,10 +47,11 @@ namespace UnityGitTool
             var stylesheet = Resources.Load<StyleSheet>("UnityGitTool");
             if (stylesheet != null) root.styleSheets.Add(stylesheet);
 
-            // Table panel built first so its columns exist before the header wires up
-            // the revision pickers that retitle them (revision name + Yours/Theirs).
-            var treePanel = BuildTreePanel();
+            // Table panel built first so its columns/`_table` exist before the tree panel's initial
+            // RefreshTree() populates the table, and before the header wires up the revision pickers
+            // that retitle those columns (revision name + Yours/Theirs).
             var tablePanel = BuildTablePanel();
+            var treePanel = BuildTreePanel();
 
             root.Add(BuildHeader());
 

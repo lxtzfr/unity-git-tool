@@ -25,6 +25,7 @@ namespace UnityGitTool
                 _revisionA = v;
                 UpdateColumnHeaders(_revisionA, _revisionB);
                 RunDiff();
+                RefreshTree();
                 _table.RefreshItems();
             });
             var menuB = BuildRevisionMenu(_revisionB, v =>
@@ -32,6 +33,7 @@ namespace UnityGitTool
                 _revisionB = v;
                 UpdateColumnHeaders(_revisionA, _revisionB);
                 RunDiff();
+                RefreshTree();
                 _table.RefreshItems();
             });
             menuA.AddToClassList("gt-revision-menu-first");
@@ -42,7 +44,12 @@ namespace UnityGitTool
             // The diff already re-runs automatically when A or B changes (see BuildRevisionMenu) —
             // this is only for re-syncing against the *same* selection, e.g. new commits landed on
             // the branch you're already comparing against.
-            var refresh = new Button(RunDiff) { text = "Refresh" };
+            var refresh = new Button(() =>
+            {
+                RunDiff();
+                RefreshTree();
+            })
+            { text = "Refresh" };
             refresh.AddToClassList("gt-pill");
             refresh.style.marginRight = 8;
             refresh.tooltip = "Re-run the diff without changing the selection";

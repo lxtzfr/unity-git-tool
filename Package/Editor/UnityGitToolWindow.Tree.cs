@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -7,25 +9,26 @@ namespace UnityGitTool
     /// <summary>Left panel: the files > GameObjects/documents > components tree.</summary>
     public partial class UnityGitToolWindow
     {
+        private TreeView _tree;
+
         private VisualElement BuildTreePanel()
         {
             var pane = new VisualElement { style = { flexGrow = 1 } };
             pane.Add(BuildPanelTitle("Files"));
 
-            var tree = new TreeView
+            _tree = new TreeView
             {
                 fixedItemHeight = 24,
                 showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
                 makeItem = BuildTreeRow,
             };
-            tree.AddToClassList("gt-tree");
-            tree.bindItem = (element, index) =>
+            _tree.AddToClassList("gt-tree");
+            _tree.bindItem = (element, index) =>
             {
-                var node = tree.GetItemDataForIndex<MockNode>(index);
+                var node = _tree.GetItemDataForIndex<MockNode>(index);
                 BindTreeRow(element, node);
             };
-            tree.SetRootItems(MockDataSource.BuildTree());
-            tree.selectionChanged += selection =>
+            _tree.selectionChanged += selection =>
             {
                 if (selection.FirstOrDefault() is MockNode node && MockDataSource.RowsByNodeId.TryGetValue(node.Id, out var rows))
                 {
@@ -33,9 +36,52 @@ namespace UnityGitTool
                     RefreshTable();
                 }
             };
-            tree.ExpandRootItems();
-            pane.Add(tree);
+            RefreshTree();
+            pane.Add(_tree);
             return pane;
+        }
+
+        /// <summary>Rebuilds the left tree from the files that actually changed between
+        /// <see cref="_revisionA"/> and <see cref="_revisionB"/> (<see cref="GitFileReader.GetChangedFiles"/>),
+        /// filtered to scene/prefab files — the only ones this tool knows how to open. Each file is
+        /// currently a leaf with no GameObject/component drill-down and an empty row list: that needs
+        /// a YAML diff parser for Unity's scene/prefab format, still to come.</summary>
+        private void RefreshTree()
+        {
+            MockDataSource.RowsByNodeId.Clear();
+            _currentRows = new List<MockRow>();
+
+            var nextId = 0;
+            var roots = new List<TreeViewItemData<MockNode>>();
+            foreach (var file in GitFileReader.GetChangedFiles(_revisionA, _revisionB))
+            {
+                MockNodeKind kind;
+                var extension = Path.GetExtension(file.Path);
+                if (extension == ".unity") kind = MockNodeKind.SceneFile;
+                else if (extension == ".prefab") kind = MockNodeKind.PrefabFile;
+                else continue;
+
+                var id = nextId++;
+                MockDataSource.RowsByNodeId[id] = new List<MockRow>();
+                var node = new MockNode
+                {
+                    Id = id,
+                    Label = Path.GetFileName(file.Path),
+                    Kind = kind,
+                    Badge = file.Status switch
+                    {
+                        GitChangeStatus.Added => MockBadge.Added,
+                        GitChangeStatus.Deleted => MockBadge.Removed,
+                        _ => MockBadge.Modified,
+                    },
+                };
+                roots.Add(new TreeViewItemData<MockNode>(id, node));
+            }
+
+            _tree.SetRootItems(roots);
+            _tree.Rebuild();
+            _tree.ExpandRootItems();
+            RefreshTable();
         }
 
         private static VisualElement BuildTreeRow()
