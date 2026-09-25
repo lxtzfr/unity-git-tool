@@ -145,6 +145,26 @@
     height: 100%;
 }
 
+/* Inspector-style component section bar — applied to every column's cell on a header row (see
+   MockRow.IsHeader) so the whole row reads as one continuous separator, not just the Property
+   column. align-items/padding-top overridden back to centered/zero since headers are single-line,
+   unlike the flex-start + padding-top property/value cells use to anchor multi-line array content
+   to the top — left as-is here, the icon+label would sit low in a taller header row otherwise.
+   min-height makes the row taller than a plain property row (DynamicHeight virtualization sizes
+   each row from its tallest cell, so this cell alone is enough to grow the whole row). */
+.gt-row-header {
+    background-color: rgba(128, 128, 128, 0.35);
+    border-top-width: 1px;
+    border-top-color: rgba(0, 0, 0, 0.3);
+    align-items: center;
+    padding-top: 0;
+    min-height: 30px;
+}
+
+.gt-row-header-label {
+    -unity-font-style: bold;
+}
+
 .gt-property-cell {
     flex-direction: row;
     align-items: flex-start;

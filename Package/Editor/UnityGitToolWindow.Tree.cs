@@ -121,10 +121,7 @@ namespace UnityGitTool
             {
                 MockNodeKind.SceneFile => "SceneAsset Icon",
                 MockNodeKind.PrefabFile => "Prefab Icon",
-                MockNodeKind.GameObject => "GameObject Icon",
-                MockNodeKind.ComponentTransform => "Transform Icon",
-                MockNodeKind.ComponentMeshRenderer => "MeshRenderer Icon",
-                _ => "cs Script Icon",
+                _ => "GameObject Icon",
             });
             label.text = node.Label;
             conflictIcon.style.display = _isMerge && node.HasConflict ? DisplayStyle.Flex : DisplayStyle.None;

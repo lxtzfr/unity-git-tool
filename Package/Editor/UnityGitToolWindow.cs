@@ -95,9 +95,25 @@ namespace UnityGitTool
 
         private void RefreshTable()
         {
-            var visible = _onlyConflicts ? _currentRows.Where(r => r.IsConflict).ToList() : _currentRows;
-            _table.itemsSource = visible;
+            _table.itemsSource = _onlyConflicts ? FilterConflictsKeepingHeaders(_currentRows) : _currentRows;
             _table.Rebuild();
+        }
+
+        /// <summary>"Only conflicts" on a flat list that also contains component-header rows: keep a
+        /// header only when at least one row under it survives the filter, so a component with no
+        /// conflicts doesn't leave a dangling, section-less header behind.</summary>
+        private static List<MockRow> FilterConflictsKeepingHeaders(List<MockRow> rows)
+        {
+            var result = new List<MockRow>();
+            MockRow pendingHeader = null;
+            foreach (var row in rows)
+            {
+                if (row.IsHeader) { pendingHeader = row; continue; }
+                if (!row.IsConflict) continue;
+                if (pendingHeader != null) { result.Add(pendingHeader); pendingHeader = null; }
+                result.Add(row);
+            }
+            return result;
         }
 
         private static Texture2D GetIcon(string name)

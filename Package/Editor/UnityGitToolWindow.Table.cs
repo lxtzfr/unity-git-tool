@@ -52,6 +52,12 @@ namespace UnityGitTool
                     cell.AddToClassList("gt-cell");
                     cell.AddToClassList("gt-property-cell");
 
+                    var typeIcon = new Image { scaleMode = ScaleMode.ScaleToFit };
+                    typeIcon.AddToClassList("gt-tree-icon");
+                    typeIcon.AddToClassList("gt-icon-sm");
+                    typeIcon.AddToClassList("gt-icon-leading");
+                    cell.Add(typeIcon);
+
                     var warnIcon = new Image { scaleMode = ScaleMode.ScaleToFit, image = GetIcon("console.warnicon") };
                     warnIcon.AddToClassList("gt-tree-icon");
                     warnIcon.AddToClassList("gt-icon-sm");
@@ -65,9 +71,26 @@ namespace UnityGitTool
                 {
                     var row = (List<MockRow>)_table.itemsSource;
                     var data = row[index];
-                    var warnIcon = (Image)element[0];
-                    var label = (Label)element[1];
+                    var typeIcon = (Image)element[0];
+                    var warnIcon = (Image)element[1];
+                    var label = (Label)element[2];
+
+                    element.EnableInClassList("gt-row-header", data.IsHeader);
+                    if (data.IsHeader)
+                    {
+                        // Inspector-style section bar: component icon, bold name, no conflict icon
+                        // (a header itself is never a mergeable field).
+                        typeIcon.style.display = DisplayStyle.Flex;
+                        typeIcon.image = GetIcon(data.HeaderIcon);
+                        warnIcon.style.display = DisplayStyle.None;
+                        label.text = data.Property;
+                        label.AddToClassList("gt-row-header-label");
+                        return;
+                    }
+
+                    typeIcon.style.display = DisplayStyle.None;
                     warnIcon.style.display = _isMerge && data.IsConflict ? DisplayStyle.Flex : DisplayStyle.None;
+                    label.RemoveFromClassList("gt-row-header-label");
                     label.text = data.Property;
                 },
             };
@@ -95,6 +118,8 @@ namespace UnityGitTool
                     var row = (List<MockRow>)_table.itemsSource;
                     var data = row[index];
                     element.Clear(); // cells are recycled across rows — previous row's field type may differ
+                    element.EnableInClassList("gt-row-header", data.IsHeader);
+                    if (data.IsHeader) return; // section bar only — no field to show on any value column
 
                     if (isResult)
                     {
@@ -154,6 +179,8 @@ namespace UnityGitTool
                     var row = (List<MockRow>)_table.itemsSource;
                     var data = row[index];
                     element.Clear();
+                    element.EnableInClassList("gt-row-header", data.IsHeader);
+                    if (data.IsHeader) return; // nothing to take/revert on a section bar
 
                     var takeA = new Button(() => { data.Result = data.ValueA; _table.RefreshItems(); }) { text = "A" };
                     takeA.AddToClassList("gt-action-button");

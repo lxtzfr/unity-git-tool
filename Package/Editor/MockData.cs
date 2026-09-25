@@ -20,6 +20,13 @@ namespace UnityGitTool
         public object ValueB;
         public object Result;
         public bool IsConflict;
+
+        /// <summary>A component-header row — Inspector-style icon + name bar separating one merged
+        /// component's rows from the next in the flat property list (see <see cref="UnityYamlDiffBuilder"/>).
+        /// Carries no value of its own; <see cref="Property"/> is the component's label and
+        /// <see cref="HeaderIcon"/> the Unity icon content name to show next to it.</summary>
+        public bool IsHeader;
+        public string HeaderIcon;
     }
 
     internal enum MockNodeKind
@@ -27,9 +34,6 @@ namespace UnityGitTool
         SceneFile,
         PrefabFile,
         GameObject,
-        ComponentTransform,
-        ComponentMeshRenderer,
-        ComponentGeneric,
     }
 
     internal enum MockBadge
@@ -56,11 +60,10 @@ namespace UnityGitTool
     /// <summary>
     /// Shared row storage for the left tree ↔ right table link: <see cref="UnityGitToolWindow"/>'s
     /// tree (see the <c>.Tree</c> partial) registers each node's rows here by node id when it builds
-    /// the tree from <see cref="GitFileReader"/>, and looks them up again on selection to populate
-    /// the table. File-level nodes come from real git data now; a node's row list is still always
-    /// empty (nothing to show below "this file changed") until the scene/prefab YAML diff parser —
-    /// the piece that would turn a changed file into per-GameObject/component <see cref="MockRow"/>
-    /// entries — exists.
+    /// the tree via <see cref="UnityYamlDiffBuilder"/>, and looks them up again on selection to
+    /// populate the table. A GameObject node's rows include its own changed fields plus every one of
+    /// its components' — the tree only goes one level deep (file &gt; GameObject), components aren't
+    /// separate tree nodes.
     /// </summary>
     internal static class MockDataSource
     {

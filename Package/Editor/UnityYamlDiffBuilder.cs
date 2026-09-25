@@ -41,9 +41,10 @@ namespace UnityGitTool
             "m_GameObject", "m_Father", "m_Children", "m_RootOrder", "m_Script",
         };
 
-        /// <summary>One file's worth of tree — the file node itself plus one child per GameObject
-        /// that exists on either side, each with its own component children. <paramref name="contentA"/>/
-        /// <paramref name="contentB"/> may be null (file added/removed on that side).</summary>
+        /// <summary>One file's worth of tree — the file node itself plus one leaf child per changed
+        /// GameObject that exists on either side (see <see cref="BuildGameObjectNode"/> for why
+        /// components aren't separate nodes). <paramref name="contentA"/>/<paramref name="contentB"/>
+        /// may be null (file added/removed on that side).</summary>
         public static TreeViewItemData<MockNode> BuildFileNode(
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
@@ -91,6 +92,10 @@ namespace UnityGitTool
             return new TreeViewItemData<MockNode>(fileId, fileNode, children);
         }
 
+        /// <summary>A GameObject is a tree LEAF — no separate Transform/MonoBehaviour/... children.
+        /// Selecting it shows its own fields plus every one of its components' fields in one flat
+        /// row list instead, each component row's <see cref="MockRow.Property"/> prefixed with that
+        /// component's label so it's still clear where each row came from.</summary>
         private static TreeViewItemData<MockNode> BuildGameObjectNode(
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
@@ -102,18 +107,19 @@ namespace UnityGitTool
             var rows = DiffFields(goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB);
 
             var componentIds = CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct();
-            var componentNodes = new List<TreeViewItemData<MockNode>>();
+            var anyComponentChanged = false;
             foreach (var compId in componentIds)
             {
                 byIdA.TryGetValue(compId, out var compA);
                 byIdB.TryGetValue(compId, out var compB);
                 if ((compB ?? compA)?.Stripped != false) continue;
 
-                var compNode = BuildComponentNode(nextId, rowsByNodeId, compA, compB, byIdA, byIdB);
-                if (compNode.data.Badge != MockBadge.None) componentNodes.Add(compNode);
+                var componentRows = BuildComponentRows(compA, compB, byIdA, byIdB, out var changed);
+                anyComponentChanged |= changed;
+                rows.AddRange(componentRows);
             }
 
-            var badge = ResolveBadge(goA, goB, rows.Count > 0 || componentNodes.Count > 0);
+            var badge = ResolveBadge(goA, goB, rows.Count > 0 || anyComponentChanged);
             var label = (goB ?? goA)?.Fields.GetValueOrDefault("m_Name") as string ?? "GameObject";
 
             var id = nextId();
@@ -124,47 +130,54 @@ namespace UnityGitTool
                 Label = label,
                 Kind = MockNodeKind.GameObject,
                 Badge = badge,
-                HasConflict = rows.Exists(r => r.IsConflict) || componentNodes.Any(c => c.data.HasConflict),
+                HasConflict = rows.Exists(r => r.IsConflict),
             };
-            return new TreeViewItemData<MockNode>(id, node, componentNodes);
+            return new TreeViewItemData<MockNode>(id, node);
         }
 
-        private static TreeViewItemData<MockNode> BuildComponentNode(
-            Func<int> nextId,
-            Dictionary<int, List<MockRow>> rowsByNodeId,
+        /// <summary>Diffs one component's fields and prepends an Inspector-style header row (icon +
+        /// name) ahead of them, so rows merged from several components into one GameObject's flat
+        /// list still read as separate sections instead of a wall of unrelated properties.
+        /// <paramref name="changed"/> is true whenever this component itself was added, removed, or
+        /// has any differing field — used by the caller to badge the owning GameObject even when the
+        /// field diff comes up empty (e.g. every field is in <see cref="ComponentIgnoredKeys"/>).</summary>
+        private static List<MockRow> BuildComponentRows(
             GitYamlDocument compA,
             GitYamlDocument compB,
             Dictionary<long, GitYamlDocument> byIdA,
-            Dictionary<long, GitYamlDocument> byIdB)
+            Dictionary<long, GitYamlDocument> byIdB,
+            out bool changed)
         {
             var typeName = compB?.TypeName ?? compA?.TypeName ?? "Component";
-            var rows = DiffFields(compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB);
-            var badge = ResolveBadge(compA, compB, rows.Count > 0);
-
-            var kind = typeName switch
-            {
-                "Transform" or "RectTransform" => MockNodeKind.ComponentTransform,
-                "MeshRenderer" or "SkinnedMeshRenderer" => MockNodeKind.ComponentMeshRenderer,
-                _ => MockNodeKind.ComponentGeneric,
-            };
-
             // "MonoBehaviour" is just the YAML document type for every script component — the actual
             // class name lives in m_Script (a MonoScript asset reference), same as Unity's own
             // Inspector title bar resolves it, not the generic type tag.
             var label = typeName == "MonoBehaviour" ? ResolveScriptLabel(compB ?? compA) : typeName;
 
-            var id = nextId();
-            rowsByNodeId[id] = rows;
-            var node = new MockNode
-            {
-                Id = id,
-                Label = label,
-                Kind = kind,
-                Badge = badge,
-                HasConflict = rows.Exists(r => r.IsConflict),
-            };
-            return new TreeViewItemData<MockNode>(id, node);
+            var fieldRows = DiffFields(compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB);
+            changed = compA == null || compB == null || fieldRows.Count > 0;
+            if (!changed) return fieldRows;
+
+            // Added/removed components mark themselves in the header rather than needing a synthetic
+            // field row below it (which had nothing real to show when every field was ignored anyway).
+            var headerLabel = compA == null ? $"{label} (added)" : compB == null ? $"{label} (removed)" : label;
+            var rows = new List<MockRow> { new() { IsHeader = true, Property = headerLabel, HeaderIcon = IconForComponentType(typeName) } };
+            rows.AddRange(fieldRows);
+            return rows;
         }
+
+        private static string IconForComponentType(string typeName) => typeName switch
+        {
+            "Transform" or "RectTransform" => "Transform Icon",
+            "MeshRenderer" or "SkinnedMeshRenderer" => "MeshRenderer Icon",
+            "MeshFilter" => "MeshFilter Icon",
+            "BoxCollider" or "SphereCollider" or "CapsuleCollider" or "MeshCollider" => "BoxCollider Icon",
+            "Rigidbody" => "Rigidbody Icon",
+            "Canvas" => "Canvas Icon",
+            "CanvasRenderer" => "CanvasRenderer Icon",
+            "MonoBehaviour" => "cs Script Icon",
+            _ => "cs Script Icon",
+        };
 
         /// <summary>Resolves a MonoBehaviour document's m_Script reference to its actual class name
         /// (e.g. "KioskManager") via the referenced MonoScript asset — falls back to the script
