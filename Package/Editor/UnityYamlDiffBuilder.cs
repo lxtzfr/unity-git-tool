@@ -61,12 +61,17 @@ namespace UnityGitTool
 
             // Only GameObjects that actually changed (own fields or a component's) are worth a tree
             // node — a scene can have thousands of untouched ones, and this is a diff tool, not an
-            // Inspector.
+            // Inspector. A "stripped" placeholder (see GitYamlDocument.Stripped) is also excluded
+            // regardless of add/remove status: it has no real content of its own to show, only
+            // bookkeeping fields pointing at a nested prefab, so it'd otherwise show up as a bare,
+            // unnamed "GameObject" node whenever the whole file is added/removed.
             var children = new List<TreeViewItemData<MockNode>>();
             foreach (var goId in gameObjectIds)
             {
                 byIdA.TryGetValue(goId, out var goA);
                 byIdB.TryGetValue(goId, out var goB);
+                if ((goB ?? goA).Stripped) continue;
+
                 var goNode = BuildGameObjectNode(nextId, rowsByNodeId, goA, goB, byIdA, byIdB);
                 if (goNode.data.Badge != MockBadge.None) children.Add(goNode);
             }
@@ -100,6 +105,8 @@ namespace UnityGitTool
             {
                 byIdA.TryGetValue(compId, out var compA);
                 byIdB.TryGetValue(compId, out var compB);
+                if ((compB ?? compA)?.Stripped != false) continue;
+
                 var compNode = BuildComponentNode(nextId, rowsByNodeId, compA, compB);
                 if (compNode.data.Badge != MockBadge.None) componentNodes.Add(compNode);
             }

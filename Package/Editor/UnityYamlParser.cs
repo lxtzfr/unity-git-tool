@@ -14,6 +14,12 @@ namespace UnityGitTool
         public long FileId;
         public string TypeName;
         public Dictionary<string, object> Fields = new();
+
+        /// <summary>A "stripped" document is a placeholder Unity emits so something inside this file
+        /// can point at an object that actually lives in a nested prefab — it carries none of that
+        /// object's real data (no m_Name, no components), only bookkeeping fields pointing at the
+        /// prefab source. Never meaningful to show as changed content.</summary>
+        public bool Stripped;
     }
 
     /// <summary>
@@ -25,7 +31,7 @@ namespace UnityGitTool
     /// </summary>
     internal static class UnityYamlParser
     {
-        private static readonly Regex DocumentHeader = new(@"^--- !u!(\d+) &(-?\d+)", RegexOptions.Compiled);
+        private static readonly Regex DocumentHeader = new(@"^--- !u!(\d+) &(-?\d+)( stripped)?", RegexOptions.Compiled);
 
         public static List<GitYamlDocument> Parse(string yaml)
         {
@@ -44,6 +50,7 @@ namespace UnityGitTool
                 {
                     ClassId = int.Parse(header.Groups[1].Value),
                     FileId = long.Parse(header.Groups[2].Value),
+                    Stripped = header.Groups[3].Success,
                 };
                 index++;
 
