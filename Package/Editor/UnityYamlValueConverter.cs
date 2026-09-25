@@ -85,8 +85,28 @@ namespace UnityGitTool
             return $"fileID:{fileId}";
         }
 
-        private static string DescribeLocalObject(GitYamlDocument document, Dictionary<long, GitYamlDocument> byId)
+        private static object DescribeLocalObject(GitYamlDocument document, Dictionary<long, GitYamlDocument> byId)
         {
+            // A "stripped" placeholder (see GitYamlDocument.Stripped) has no m_Name/m_GameObject of
+            // its own — it's a pointer into a nested prefab instance. Its m_CorrespondingSourceObject
+            // names which prefab asset that real object lives in, so resolve THAT instead of falling
+            // back to a bare "MonoBehaviour"/"Transform" type name with no other context. Loading the
+            // prefab's root as the ObjectField's value isn't the exact sub-object, but it's clickable
+            // and gets the user to the right asset — better than inert text.
+            if (document.Stripped &&
+                document.Fields.TryGetValue("m_CorrespondingSourceObject", out var sourceRef) &&
+                sourceRef is Dictionary<string, object> sourceMap &&
+                sourceMap.TryGetValue("guid", out var sourceGuid) && sourceGuid is string guid)
+            {
+                var path = AssetDatabase.GUIDToAssetPath(guid);
+                if (!string.IsNullOrEmpty(path))
+                {
+                    var asset = AssetDatabase.LoadMainAssetAtPath(path);
+                    if (asset != null) return asset;
+                    return $"{Path.GetFileNameWithoutExtension(path)} ({document.TypeName})";
+                }
+            }
+
             if (document.TypeName == "GameObject")
                 return document.Fields.TryGetValue("m_Name", out var name) && name is string n ? n : "GameObject";
 
