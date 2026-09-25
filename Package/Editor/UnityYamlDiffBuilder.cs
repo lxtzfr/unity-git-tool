@@ -205,7 +205,7 @@ namespace UnityGitTool
                 var isConflict = hasA && hasB;
                 rows.Add(new MockRow
                 {
-                    Property = key,
+                    Property = UnityYamlFieldNames.Humanize(key),
                     ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA) : null,
                     ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB) : null,
                     IsConflict = isConflict,
