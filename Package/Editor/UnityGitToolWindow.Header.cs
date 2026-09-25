@@ -3,7 +3,7 @@ using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>Toolbar: revision pickers (A/B), manual refresh, Diff/Merge mode, and filter pills.</summary>
+    /// <summary>Toolbar: revision pickers (A/B), manual refresh, Diff/Merge mode.</summary>
     public partial class UnityGitToolWindow
     {
         private VisualElement BuildHeader()
@@ -51,7 +51,6 @@ namespace UnityGitTool
             })
             { text = "Refresh" };
             refresh.AddToClassList("gt-pill");
-            refresh.style.marginRight = 8;
             refresh.tooltip = "Re-run the diff without changing the selection";
 
             var modeGroup = new VisualElement();
@@ -65,9 +64,9 @@ namespace UnityGitTool
             modeGroup.Add(diffModeButton);
             modeGroup.Add(mergeModeButton);
 
-            // Manual for now — a real merge in progress (.git/MERGE_HEAD present) should default
-            // this to Merge automatically later, with these two buttons staying as the override for
-            // previewing a hypothetical merge without actually being mid-merge.
+            // Manual by default; "Auto-config merge branches" below flips this to Merge automatically
+            // when a real merge is in progress. These two buttons stay as the override for previewing
+            // a hypothetical merge (any A/B pair) without actually being mid-merge.
             void SetMode(bool isMerge)
             {
                 _isMerge = isMerge;
@@ -82,24 +81,51 @@ namespace UnityGitTool
             }
             SetMode(isMerge: false);
 
-            var filterGroup = new VisualElement();
-            filterGroup.AddToClassList("gt-filter-group");
-
-            var onlyChanges = BuildToggleChip("Only changes", false, _ => { });
-            var onlyConflicts = BuildToggleChip("Only conflicts", false, v =>
+            // One-click stand-in for "config auto les branches en merge conflict": detects whichever
+            // of merge/rebase/cherry-pick/revert is stopped on conflicts and points A/B at Working Tree
+            // (yours) / that operation's conflict ref (theirs) — real refs, so
+            // GetChangedFiles/ReadFileAtRevision need no special-casing — then flips to Merge mode.
+            var autoConfig = new Button(() =>
             {
-                _onlyConflicts = v;
-                RefreshTable();
-            });
-            var hideIncompatible = BuildToggleChip("Hide incompatible files", true, _ => { });
-            filterGroup.Add(onlyChanges);
-            filterGroup.Add(onlyConflicts);
-            filterGroup.Add(hideIncompatible);
+                var (kind, conflictRef) = GitFileReader.DetectConflict();
+                if (kind == GitConflictKind.None)
+                {
+                    SetStatus("No merge/rebase/cherry-pick/revert in progress — nothing to auto-configure.");
+                    return;
+                }
+                // Working Tree rather than "HEAD" for A: byte-identical to HEAD right now (git leaves
+                // the working copy untouched until something resolves the conflict), but Working Tree
+                // is what ApplyResolution actually reads/patches/writes — using it here means the tool
+                // is already pointed at a file Apply can act on, no extra step needed.
+                _revisionA = WorkingTree;
+                _revisionB = conflictRef;
+                menuA.text = _revisionA;
+                menuB.text = _revisionB;
+                UpdateColumnHeaders(_revisionA, _revisionB);
+                SetMode(isMerge: true);
+                SetStatus($"{kind} in progress: Working Tree vs {GitFileReader.GetRefDisplayName(conflictRef)} ({conflictRef})");
+                RunDiff();
+                RefreshTree();
+                _table.RefreshItems();
+            })
+            { text = "Auto-config merge branches" };
+            autoConfig.AddToClassList("gt-pill");
+            autoConfig.style.marginRight = 8;
+            autoConfig.tooltip = "Detect an in-progress merge/rebase/cherry-pick/revert and set A/B to HEAD / the conflict ref";
+
+            // Writes the selected file's resolved fields back to disk and stages it — see
+            // UnityGitToolWindow.Apply.cs. Only meaningful once A is Working Tree (Auto-config above
+            // sets it) and a whole file (not just one GameObject) is selected in the tree.
+            var apply = new Button(ApplyResolution) { text = "Apply resolution" };
+            apply.AddToClassList("gt-pill");
+            apply.style.marginRight = 8;
+            apply.tooltip = "Write the selected file's resolved fields to the working tree and `git add` it";
 
             toolbar.Add(revisionGroup);
             toolbar.Add(refresh);
+            toolbar.Add(autoConfig);
+            toolbar.Add(apply);
             toolbar.Add(modeGroup);
-            toolbar.Add(filterGroup);
             var spacer = new VisualElement();
             spacer.AddToClassList("gt-flex-spacer");
             toolbar.Add(spacer);
@@ -140,24 +166,6 @@ namespace UnityGitTool
                 }
             }
             return menu;
-        }
-
-        /// <summary>A filter toggle styled as a pill that fills with color when active, instead of
-        /// the default checkbox-style <see cref="Toggle"/> — easier to scan at a glance in a row of
-        /// several filters.</summary>
-        private static Button BuildToggleChip(string label, bool initialValue, System.Action<bool> onChange)
-        {
-            var isOn = initialValue;
-            var button = new Button { text = label };
-            button.AddToClassList("gt-pill");
-            button.EnableInClassList("gt-toggle-chip-active", isOn);
-            button.clicked += () =>
-            {
-                isOn = !isOn;
-                button.EnableInClassList("gt-toggle-chip-active", isOn);
-                onChange(isOn);
-            };
-            return button;
         }
 
         private void UpdateColumnHeaders(string revisionA, string revisionB)

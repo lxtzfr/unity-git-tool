@@ -17,6 +17,17 @@ namespace UnityGitTool
         Unknown,
     }
 
+    /// <summary>Which git operation (if any) is currently stopped on conflicts — see
+    /// <see cref="GitFileReader.DetectConflict"/>.</summary>
+    public enum GitConflictKind
+    {
+        None,
+        Merge,
+        Rebase,
+        CherryPick,
+        Revert,
+    }
+
     internal readonly struct GitChangedFile
     {
         public readonly string Path;
@@ -72,6 +83,48 @@ namespace UnityGitTool
         /// <c>UnityGitToolWindow.WorkingTree</c>, the picker's label for the same concept.</summary>
         public const string WorkingTree = "Working Tree";
 
+        /// <summary>Every git operation that can stop mid-way on conflicts, each backed by its own
+        /// pseudo-ref pointing at "the other side" of the 3-way conflict. Order matters: a rebase can
+        /// leave stray state from a much older interrupted merge lying around, so the operation-specific
+        /// refs are checked before the generic <c>MERGE_HEAD</c>.</summary>
+        private static readonly (GitConflictKind Kind, string ConflictRef)[] ConflictRefsByPriority =
+        {
+            (GitConflictKind.Rebase, "REBASE_HEAD"),
+            (GitConflictKind.CherryPick, "CHERRY_PICK_HEAD"),
+            (GitConflictKind.Revert, "REVERT_HEAD"),
+            (GitConflictKind.Merge, "MERGE_HEAD"),
+        };
+
+        /// <summary>Detects whether `git merge`/`rebase`/`cherry-pick`/`revert` is currently stopped on
+        /// conflicts, and if so which ref stands in for "the other side". Checked via plumbing
+        /// (<c>rev-parse -q --verify</c>) rather than reading <c>.git/MERGE_HEAD</c> etc. directly, so
+        /// it still resolves correctly under worktrees/submodules, where <c>.git</c> isn't a plain
+        /// directory. Git's own <c>--ours</c>/<c>--theirs</c> convention always means "HEAD" / "this
+        /// ref" — for a merge that's intuitive (HEAD = your branch), for a rebase it's the classic
+        /// gotcha where HEAD is actually the upstream you're replaying onto and this ref is your own
+        /// original commit. This tool follows git's convention rather than inventing its own, so the
+        /// "Yours"/"Theirs" column labels stay consistent with `git checkout --ours`/`--theirs`.</summary>
+        public static (GitConflictKind Kind, string ConflictRef) DetectConflict()
+        {
+            foreach (var (kind, conflictRef) in ConflictRefsByPriority)
+                if (TryRunGit(RepositoryRoot, $"rev-parse -q --verify {conflictRef}", out _))
+                    return (kind, conflictRef);
+            return (GitConflictKind.None, null);
+        }
+
+        /// <summary>Best-effort display name for <paramref name="gitRef"/> — falls back to its short
+        /// hash when it isn't the tip of a known local/remote branch (e.g. merging/rebasing onto a
+        /// bare commit or an already-deleted branch).</summary>
+        public static string GetRefDisplayName(string gitRef)
+        {
+            if (TryRunGit(RepositoryRoot, $"name-rev --name-only --exclude=tags/* {gitRef}", out var name))
+            {
+                name = name.Trim();
+                if (!string.IsNullOrEmpty(name) && name != "undefined") return name;
+            }
+            return TryRunGit(RepositoryRoot, $"rev-parse --short {gitRef}", out var hash) ? hash.Trim() : gitRef;
+        }
+
         private static string _repositoryRoot;
 
         /// <summary>Absolute path to the repository root, resolved once via
@@ -122,6 +175,23 @@ namespace UnityGitTool
             return commits;
         }
 
+        /// <summary>Exactly the paths git itself considers unresolved right now (index stage &gt; 0 —
+        /// the same set `git status` marks UU/AA/AU/UA/UD/DU). A two-revision field diff (see
+        /// <see cref="UnityYamlDiffBuilder"/>) has no common ancestor to tell "both sides changed this
+        /// field, and it genuinely conflicts" from "both sides differ from some older field value,
+        /// but git's real 3-way merge already resolved it cleanly" — every field a rebase/merge
+        /// touched at all would otherwise look like an unresolved conflict, on every file it touched,
+        /// not just the ones that actually need attention. This is what gates that: a field only ever
+        /// counts as a real conflict when its own file is in this set.</summary>
+        public static List<string> GetConflictedFiles()
+        {
+            var files = new List<string>();
+            if (!TryRunGit(RepositoryRoot, "diff --name-only --diff-filter=U", out var output))
+                return files;
+            files.AddRange(SplitLines(output));
+            return files;
+        }
+
         /// <summary>Files changed between two revisions. At most one of <paramref name="revisionA"/>
         /// / <paramref name="revisionB"/> may be <see cref="WorkingTree"/> — git has no ref for it,
         /// so that side is simply omitted from the `git diff` call (its default comparison target
@@ -163,8 +233,23 @@ namespace UnityGitTool
                 var oldPath = isMove ? fields[1] : null;
                 files.Add(new GitChangedFile(path, oldPath, status));
             }
-            return files;
+
+            // A path with unresolved conflict stages in the index can get two lines from `git diff
+            // --name-status <tree>` for the exact same resulting path (observed e.g. "M path" then
+            // "A path") — git resolving the ambiguous "old side" of an unmerged entry against the
+            // tree two different ways rather than a real double change. Keep the first (its status is
+            // the meaningful one; a later duplicate is the artifact) so a path is never listed twice.
+            var seenPaths = new HashSet<string>();
+            return files.Where(f => seenPaths.Add(f.Path)).ToList();
         }
+
+        /// <summary>Stages <paramref name="relativePath"/> (`git add`) — how <see cref="UnityYamlWriter"/>'s
+        /// caller marks a conflicted path resolved once it has written the merged content to disk.
+        /// Git itself doesn't care that the content still contains an unresolved field; it just cares
+        /// that the file was `add`ed, so the caller is responsible for only doing this after a fully
+        /// clean apply (no entries in <c>Skipped</c>).</summary>
+        public static bool StageFile(string relativePath) =>
+            TryRunGit(RepositoryRoot, $"add -- {EscapeArg(relativePath.Replace('\\', '/'))}", out _);
 
         /// <summary>Content of <paramref name="relativePath"/> at <paramref name="revision"/> — read
         /// straight off disk for <see cref="WorkingTree"/>, `git show revision:path` otherwise.

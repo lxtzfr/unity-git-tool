@@ -16,11 +16,14 @@ namespace UnityGitTool
     /// rather than a delete+add pair.
     ///
     /// This is a two-revision diff, not a three-way merge — there's no common-ancestor revision to
-    /// tell an auto-mergeable change from a real conflict. Every field both sides have but disagree
-    /// on is surfaced as <see cref="MockRow.IsConflict"/> (unresolved, needs a pick) the same way
-    /// the old mock data did for its "both sides changed it" rows; a field only one side has is
-    /// pre-filled into <see cref="MockRow.Result"/> as auto-mergeable, since there's nothing to
-    /// choose between.
+    /// tell an auto-mergeable change from a real conflict on its own, which is why
+    /// <see cref="BuildFileNode"/> takes <c>fileIsConflicted</c> (<see cref="GitFileReader.GetConflictedFiles"/>,
+    /// git's own answer to that question): a field both sides have but disagree on is only surfaced
+    /// as <see cref="MockRow.IsConflict"/> (unresolved, needs a pick) when its file is one git itself
+    /// hasn't resolved yet — otherwise git's real 3-way merge already picked a winner (or resolved it
+    /// outright) and A already holds it, so it's auto-mergeable like a single-side change. A field
+    /// only one side has is always pre-filled into <see cref="MockRow.Result"/> as auto-mergeable,
+    /// conflicted file or not, since there's nothing to choose between.
     /// </summary>
     internal static class UnityYamlDiffBuilder
     {
@@ -41,70 +44,198 @@ namespace UnityGitTool
             "m_GameObject", "m_Father", "m_Children", "m_RootOrder", "m_Script",
         };
 
-        /// <summary>One file's worth of tree — the file node itself plus one leaf child per changed
-        /// GameObject that exists on either side (see <see cref="BuildGameObjectNode"/> for why
-        /// components aren't separate nodes). <paramref name="contentA"/>/<paramref name="contentB"/>
-        /// may be null (file added/removed on that side).</summary>
+        /// <summary>One file's worth of tree — the file node, then one node per changed GameObject
+        /// nested under its real parent chain (via each GameObject's Transform.m_Father — see
+        /// <see cref="GetParentGameObjectId"/>), same shape a Hierarchy window would show, not a flat
+        /// list. An ancestor that isn't itself changed still gets a node when a descendant is (a
+        /// "passthrough" — see <see cref="BuildGameObjectSubtree"/>) purely so the nesting reads
+        /// correctly; components stay flattened onto their owning GameObject's row list rather than
+        /// becoming their own nodes (see that method for why). <paramref name="contentA"/>/
+        /// <paramref name="contentB"/> may be null (file added/removed on that side).
+        /// <paramref name="bIsOlderBaseline"/> flips which side missing a document reads as Added vs
+        /// Removed (see <see cref="ResolveBadge"/>): false (the normal case — A is the reference/base,
+        /// B the side introducing a change, e.g. Yours vs Theirs in a real conflict, or A=HEAD/B=Working
+        /// Tree in a plain browse) means "missing from A" reads as Added; true (only ever passed when B
+        /// is a HEAD fallback for a non-conflicted file — see UnityGitToolWindow.Tree.cs — where B is
+        /// actually the OLDER side despite being on the same "B" side of every other A/B convention in
+        /// this tool) flips that, since there A is now the newer state and B the older one it's being
+        /// compared against.</summary>
         public static TreeViewItemData<MockNode> BuildFileNode(
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
             string label,
+            string filePath,
             MockNodeKind fileKind,
             MockBadge fileBadge,
             string contentA,
-            string contentB)
+            string contentB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline = false)
         {
             var byIdA = IndexByFileId(UnityYamlParser.Parse(contentA));
             var byIdB = IndexByFileId(UnityYamlParser.Parse(contentB));
 
-            var gameObjectIds = byIdA.Values.Concat(byIdB.Values)
+            // Only GameObjects that actually changed (own fields or a component's) start a walk — a
+            // scene can have thousands of untouched ones, and walking every single one up to the root
+            // just to throw most of the result away isn't worth it. A "stripped" placeholder (see
+            // GitYamlDocument.Stripped) never counts as changed regardless of add/remove status: it
+            // has no real content of its own, only bookkeeping fields pointing at a nested prefab.
+            var changedIds = byIdA.Values.Concat(byIdB.Values)
                 .Where(d => d.TypeName == "GameObject")
                 .Select(d => d.FileId)
-                .Distinct();
+                .Distinct()
+                .Where(id =>
+                {
+                    byIdA.TryGetValue(id, out var a);
+                    byIdB.TryGetValue(id, out var b);
+                    return !(b ?? a).Stripped && HasGameObjectChanged(id, byIdA, byIdB);
+                });
 
-            // Only GameObjects that actually changed (own fields or a component's) are worth a tree
-            // node — a scene can have thousands of untouched ones, and this is a diff tool, not an
-            // Inspector. A "stripped" placeholder (see GitYamlDocument.Stripped) is also excluded
-            // regardless of add/remove status: it has no real content of its own to show, only
-            // bookkeeping fields pointing at a nested prefab, so it'd otherwise show up as a bare,
-            // unnamed "GameObject" node whenever the whole file is added/removed.
-            var children = new List<TreeViewItemData<MockNode>>();
-            foreach (var goId in gameObjectIds)
+            // Each changed GameObject's full ancestor chain (via Transform.m_Father), unioned, so it
+            // nests under its real parent all the way to the scene root instead of flattening onto the
+            // file directly. An ancestor that isn't itself changed still ends up in this set — that's
+            // deliberate (see BuildGameObjectSubtree) — its own diff just comes up empty, which is what
+            // marks it as a structural passthrough rather than a real change.
+            var included = new HashSet<long>();
+            var parentOf = new Dictionary<long, long>();
+            foreach (var id in changedIds)
             {
-                byIdA.TryGetValue(goId, out var goA);
-                byIdB.TryGetValue(goId, out var goB);
-                if ((goB ?? goA).Stripped) continue;
-
-                var goNode = BuildGameObjectNode(nextId, rowsByNodeId, goA, goB, byIdA, byIdB);
-                if (goNode.data.Badge != MockBadge.None) children.Add(goNode);
+                var current = id;
+                while (included.Add(current))
+                {
+                    var parentId = GetParentGameObjectId(current, byIdA, byIdB);
+                    parentOf[current] = parentId;
+                    if (parentId == 0) break;
+                    current = parentId;
+                }
             }
 
-            var fileId = nextId();
-            rowsByNodeId[fileId] = new List<MockRow>();
+            var childrenOf = new Dictionary<long, List<long>>();
+            foreach (var id in included)
+            {
+                var parentId = parentOf.GetValueOrDefault(id, 0);
+                if (parentId == 0) continue;
+                if (!childrenOf.TryGetValue(parentId, out var list)) childrenOf[parentId] = list = new List<long>();
+                list.Add(id);
+            }
+
+            var children = included
+                .Where(id => parentOf.GetValueOrDefault(id, 0) == 0)
+                .Select(rootId => BuildGameObjectSubtree(rootId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline))
+                .ToList();
+
+            var nodeId = nextId();
+            // The file node's own row list is every child's AGGREGATED rows concatenated (each already
+            // includes its own descendants' — see BuildGameObjectSubtree) — lets
+            // UnityGitToolWindow.ApplyResolution act on every change in the file at once. Has no
+            // OwnRowsByNodeId entry of its own: a file is never shown in the table directly (see
+            // UnityGitToolWindow.Tree.cs), only acted on via Apply.
+            rowsByNodeId[nodeId] = children.SelectMany(c => rowsByNodeId.GetValueOrDefault(c.id) ?? new List<MockRow>()).ToList();
             var fileNode = new MockNode
             {
-                Id = fileId,
+                Id = nodeId,
                 Label = label,
+                FilePath = filePath,
                 Kind = fileKind,
                 Badge = fileBadge,
                 HasConflict = children.Any(c => c.data.HasConflict),
             };
-            return new TreeViewItemData<MockNode>(fileId, fileNode, children);
+            return new TreeViewItemData<MockNode>(nodeId, fileNode, children);
         }
 
-        /// <summary>A GameObject is a tree LEAF — no separate Transform/MonoBehaviour/... children.
-        /// Selecting it shows its own fields plus every one of its components' fields in one flat
-        /// row list instead, each component row's <see cref="MockRow.Property"/> prefixed with that
-        /// component's label so it's still clear where each row came from.</summary>
-        private static TreeViewItemData<MockNode> BuildGameObjectNode(
+        /// <summary>Resolves <paramref name="gameObjectId"/>'s parent GameObject's FileId via its own
+        /// Transform/RectTransform component's <c>m_Father</c> — 0 (Unity's own "no reference"
+        /// sentinel) at the scene root or when anything along the chain can't be resolved. Prefers B
+        /// (the incoming/current side) for structure, falling back to A only where B doesn't have the
+        /// object at all (added-in-A-only, i.e. removed on B).</summary>
+        private static long GetParentGameObjectId(long gameObjectId, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            var transformId = FindTransformId(gameObjectId, byIdB) ?? FindTransformId(gameObjectId, byIdA);
+            if (transformId == null) return 0;
+
+            var transform = byIdB.GetValueOrDefault(transformId.Value) ?? byIdA.GetValueOrDefault(transformId.Value);
+            if (transform == null) return 0;
+            if (!transform.Fields.TryGetValue("m_Father", out var fatherRef) || fatherRef is not Dictionary<string, object> fatherMap) return 0;
+            if (!fatherMap.TryGetValue("fileID", out var rawFatherId) || rawFatherId is not string fatherIdStr ||
+                !long.TryParse(fatherIdStr, out var fatherTransformId) || fatherTransformId == 0) return 0;
+
+            var fatherTransform = byIdB.GetValueOrDefault(fatherTransformId) ?? byIdA.GetValueOrDefault(fatherTransformId);
+            if (fatherTransform == null || !fatherTransform.Fields.TryGetValue("m_GameObject", out var ownerRef) ||
+                ownerRef is not Dictionary<string, object> ownerMap) return 0;
+            if (!ownerMap.TryGetValue("fileID", out var rawOwnerId) || rawOwnerId is not string ownerIdStr ||
+                !long.TryParse(ownerIdStr, out var ownerId)) return 0;
+            return ownerId;
+        }
+
+        private static long? FindTransformId(long gameObjectId, Dictionary<long, GitYamlDocument> byId)
+        {
+            if (!byId.TryGetValue(gameObjectId, out var gameObject)) return null;
+            foreach (var compId in CollectComponentIds(gameObject))
+                if (byId.TryGetValue(compId, out var comp) && comp.TypeName is "Transform" or "RectTransform")
+                    return compId;
+            return null;
+        }
+
+        /// <summary>Cheap "did this change at all" check — added/removed entirely, an own field
+        /// differs, or a component was added/removed/differs — reusing <see cref="DiffFields"/> itself
+        /// (with a throwaway <c>fileIsConflicted</c>, irrelevant to a field simply existing) rather
+        /// than a second hand-rolled equality pass that could drift from what <see cref="BuildGameObjectSubtree"/>
+        /// actually builds later. <see cref="GameObjectIgnoredKeys"/> already covers everything m_Component's
+        /// own presence (as opposed to its target's content) is about — see that field's comment.</summary>
+        private static bool HasGameObjectChanged(long id, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            byIdA.TryGetValue(id, out var goA);
+            byIdB.TryGetValue(id, out var goB);
+            if (goA == null || goB == null) return true;
+            if (DiffFields(0, goA.Fields, goB.Fields, GameObjectIgnoredKeys, byIdA, byIdB, false).Count > 0) return true;
+
+            foreach (var compId in CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct())
+            {
+                byIdA.TryGetValue(compId, out var compA);
+                byIdB.TryGetValue(compId, out var compB);
+                if ((compB ?? compA)?.Stripped != false) continue;
+                if (compA == null || compB == null) return true;
+                if (DiffFields(0, compA.Fields, compB.Fields, ComponentIgnoredKeys, byIdA, byIdB, false).Count > 0) return true;
+            }
+            return false;
+        }
+
+        /// <summary>One GameObject's node, plus every one of its own components' rows flattened onto
+        /// it (component identity itself was never useful as a separate tree node — see the header
+        /// row <see cref="BuildComponentRows"/> already prepends), plus, now, its actual child
+        /// GameObjects nested underneath as their own subtrees. An unchanged GameObject with a changed
+        /// descendant still gets a node here — same "passthrough" idea as a folder in a file tree —
+        /// so nesting reads correctly instead of flattening every changed object straight onto the
+        /// file; its own <c>ownRows</c> stays empty and its <see cref="MockNode.Badge"/> stays
+        /// <see cref="MockBadge.None"/>, distinguishing it from a real change at a glance. Registers
+        /// two different row lists for this id — see <see cref="MockDataSource"/> for why a child
+        /// GameObject's own components must never be attributed to its parent's table view just
+        /// because the parent happens to be selected.</summary>
+        private static TreeViewItemData<MockNode> BuildGameObjectSubtree(
+            long id,
+            Dictionary<long, List<long>> childrenOf,
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
-            GitYamlDocument goA,
-            GitYamlDocument goB,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
             Dictionary<long, GitYamlDocument> byIdA,
-            Dictionary<long, GitYamlDocument> byIdB)
+            Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline)
         {
-            var rows = DiffFields(goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB);
+            byIdA.TryGetValue(id, out var goA);
+            byIdB.TryGetValue(id, out var goB);
+
+            var childItems = new List<TreeViewItemData<MockNode>>();
+            if (childrenOf.TryGetValue(id, out var childIds))
+                foreach (var childId in childIds)
+                    childItems.Add(BuildGameObjectSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline));
+
+            // Write-back only ever patches revision A's own file (see UnityYamlWriter) — a row whose
+            // object doesn't exist on the A side at all (FileId 0, Unity's own "no reference" sentinel,
+            // safe to reuse since a real document never has it) has nothing to splice into; it's
+            // filtered out at apply time instead of guessed at.
+            var ownRows = DiffFields(goA?.FileId ?? 0, goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
 
             var componentIds = CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct();
             var anyComponentChanged = false;
@@ -114,25 +245,30 @@ namespace UnityGitTool
                 byIdB.TryGetValue(compId, out var compB);
                 if ((compB ?? compA)?.Stripped != false) continue;
 
-                var componentRows = BuildComponentRows(compA, compB, byIdA, byIdB, out var changed);
+                var componentRows = BuildComponentRows(compA, compB, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, out var changed);
                 anyComponentChanged |= changed;
-                rows.AddRange(componentRows);
+                ownRows.AddRange(componentRows);
             }
 
-            var badge = ResolveBadge(goA, goB, rows.Count > 0 || anyComponentChanged);
+            var badge = ResolveBadge(goA, goB, ownRows.Count > 0 || anyComponentChanged, bIsOlderBaseline);
             var label = (goB ?? goA)?.Fields.GetValueOrDefault("m_Name") as string ?? "GameObject";
 
-            var id = nextId();
-            rowsByNodeId[id] = rows;
+            var nodeId = nextId();
+            ownRowsByNodeId[nodeId] = ownRows;
+            // Aggregated the same way BuildFileNode aggregates its own children: an unchanged
+            // (passthrough) node's ownRows is empty, so this is purely its descendants'; a changed
+            // node's is its own rows plus whatever's further down. Only ApplyResolution (via a file
+            // node) ever reads this one — the table reads OwnRowsByNodeId instead.
+            rowsByNodeId[nodeId] = ownRows.Concat(childItems.SelectMany(c => rowsByNodeId.GetValueOrDefault(c.id) ?? new List<MockRow>())).ToList();
             var node = new MockNode
             {
-                Id = id,
+                Id = nodeId,
                 Label = label,
                 Kind = MockNodeKind.GameObject,
                 Badge = badge,
-                HasConflict = rows.Exists(r => r.IsConflict),
+                HasConflict = ownRows.Exists(r => r.IsConflict) || childItems.Any(c => c.data.HasConflict),
             };
-            return new TreeViewItemData<MockNode>(id, node);
+            return new TreeViewItemData<MockNode>(nodeId, node, childItems);
         }
 
         /// <summary>Diffs one component's fields and prepends an Inspector-style header row (icon +
@@ -146,6 +282,8 @@ namespace UnityGitTool
             GitYamlDocument compB,
             Dictionary<long, GitYamlDocument> byIdA,
             Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline,
             out bool changed)
         {
             var typeName = compB?.TypeName ?? compA?.TypeName ?? "Component";
@@ -154,13 +292,16 @@ namespace UnityGitTool
             // Inspector title bar resolves it, not the generic type tag.
             var label = typeName == "MonoBehaviour" ? ResolveScriptLabel(compB ?? compA) : typeName;
 
-            var fieldRows = DiffFields(compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB);
+            var fieldRows = DiffFields(compA?.FileId ?? 0, compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
             changed = compA == null || compB == null || fieldRows.Count > 0;
             if (!changed) return fieldRows;
 
             // Added/removed components mark themselves in the header rather than needing a synthetic
             // field row below it (which had nothing real to show when every field was ignored anyway).
-            var headerLabel = compA == null ? $"{label} (added)" : compB == null ? $"{label} (removed)" : label;
+            // See BuildFileNode's doc comment for bIsOlderBaseline — same Added/Removed direction flip.
+            var isAdded = bIsOlderBaseline ? compB == null : compA == null;
+            var isRemoved = bIsOlderBaseline ? compA == null : compB == null;
+            var headerLabel = isAdded ? $"{label} (added)" : isRemoved ? $"{label} (removed)" : label;
             var rows = new List<MockRow> { new() { IsHeader = true, Property = headerLabel, HeaderIcon = IconForComponentType(typeName) } };
             rows.AddRange(fieldRows);
             return rows;
@@ -201,10 +342,12 @@ namespace UnityGitTool
             return "MonoBehaviour";
         }
 
-        private static MockBadge ResolveBadge(GitYamlDocument a, GitYamlDocument b, bool hasChanges)
+        /// <summary>See <see cref="BuildFileNode"/>'s doc comment for what <paramref name="bIsOlderBaseline"/>
+        /// means and when it's true.</summary>
+        private static MockBadge ResolveBadge(GitYamlDocument a, GitYamlDocument b, bool hasChanges, bool bIsOlderBaseline)
         {
-            if (a == null) return MockBadge.Added;
-            if (b == null) return MockBadge.Removed;
+            if (a == null) return bIsOlderBaseline ? MockBadge.Removed : MockBadge.Added;
+            if (b == null) return bIsOlderBaseline ? MockBadge.Added : MockBadge.Removed;
             return hasChanges ? MockBadge.Modified : MockBadge.None;
         }
 
@@ -232,11 +375,14 @@ namespace UnityGitTool
         }
 
         private static List<MockRow> DiffFields(
+            long fileId,
             Dictionary<string, object> fieldsA,
             Dictionary<string, object> fieldsB,
             HashSet<string> ignoredKeys,
             Dictionary<long, GitYamlDocument> byIdA,
-            Dictionary<long, GitYamlDocument> byIdB)
+            Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline = false)
         {
             var rows = new List<MockRow>();
             var keys = (fieldsA?.Keys ?? Enumerable.Empty<string>()).Concat(fieldsB?.Keys ?? Enumerable.Empty<string>()).Distinct();
@@ -251,13 +397,24 @@ namespace UnityGitTool
                 var hasB = fieldsB != null && fieldsB.TryGetValue(key, out rawB);
                 if (YamlValuesEqual(rawA, rawB)) continue;
 
-                var isConflict = hasA && hasB;
+                // Without fileIsConflicted, "both sides have it and it differs" alone would flag every
+                // field a rebase/merge touched at all, on every file it touched — see the class
+                // header for why that's wrong for a file git already resolved cleanly.
+                var isConflict = fileIsConflicted && hasA && hasB;
                 rows.Add(new MockRow
                 {
                     Property = UnityYamlFieldNames.Humanize(key),
+                    FileId = fileId,
+                    Key = key,
+                    BIsOlderBaseline = bIsOlderBaseline,
                     ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA, byIdA) : null,
                     ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB, byIdB) : null,
                     IsConflict = isConflict,
+                    // Only one side to pick when it's not a conflict — auto-resolves to whichever side
+                    // has the field, same value MockRow.Result gets below. See MockResolution: this is
+                    // what UnityGitToolWindow.Table.cs's Take A/B/Revert buttons and the Result field's
+                    // own inline edit callback (Manual) go on to overwrite.
+                    Resolution = isConflict ? MockResolution.Unresolved : hasA ? MockResolution.A : MockResolution.B,
                     Result = isConflict ? null : UnityYamlValueConverter.ToDisplayValue(hasA ? rawA : rawB, hasA ? byIdA : byIdB),
                 });
             }

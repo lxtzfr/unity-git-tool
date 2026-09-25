@@ -20,6 +20,30 @@ namespace UnityGitTool
         /// object's real data (no m_Name, no components), only bookkeeping fields pointing at the
         /// prefab source. Never meaningful to show as changed content.</summary>
         public bool Stripped;
+
+        /// <summary>Source-line range (start inclusive, end exclusive, matching the parser's own
+        /// index semantics) of each top-level field under this document's <see cref="TypeName"/> key
+        /// — <see cref="UnityYamlWriter"/>'s only hook back into the raw text. Not populated for
+        /// nested values (a Vector3's x/y/z, a list item, ...); write-back only ever replaces a whole
+        /// top-level field's block, never reaches inside one.</summary>
+        public Dictionary<string, LineSpan> FieldSpans = new();
+
+        /// <summary>Line index one past this document's last top-level field (or right after the
+        /// `&lt;TypeName&gt;:` line if it has none) — where a brand-new field (one that exists on the
+        /// other side but not here) gets appended by <see cref="UnityYamlWriter"/>. Field order inside
+        /// a YAML mapping has no semantic meaning to Unity, so appending instead of preserving the
+        /// other side's original position is safe.</summary>
+        public int BodyEndLine;
+    }
+
+    /// <summary>A half-open source-line range: <see cref="Start"/> inclusive, <see cref="End"/>
+    /// exclusive — same convention as the parser's own <c>index</c> cursor, so a span can be sliced
+    /// directly as <c>lines[Start..End]</c>.</summary>
+    internal readonly struct LineSpan
+    {
+        public readonly int Start;
+        public readonly int End;
+        public LineSpan(int start, int end) { Start = start; End = end; }
     }
 
     /// <summary>
@@ -64,8 +88,22 @@ namespace UnityGitTool
                     document.TypeName = colon > 0 ? typeLine.Substring(0, colon).Trim() : typeLine.Trim();
                     index++;
 
-                    if (ParseNode(lines, ref index) is Dictionary<string, object> fields)
+                    SkipBlank(lines, ref index);
+                    // A document's own body is always a mapping in practice (Unity never emits a bare
+                    // sequence directly under "<TypeName>:") — only that shape gets span tracking; the
+                    // fallback keeps parsing correct for anything else, just without write-back support.
+                    if (index < lines.Length && !IsSequenceLine(lines[index].TrimStart()))
+                    {
+                        var bodyIndent = CountIndent(lines[index]);
+                        var (fields, spans) = ParseMappingWithSpans(lines, ref index, bodyIndent);
                         document.Fields = fields;
+                        document.FieldSpans = spans;
+                    }
+                    else if (ParseNode(lines, ref index) is Dictionary<string, object> fallbackFields)
+                    {
+                        document.Fields = fallbackFields;
+                    }
+                    document.BodyEndLine = index;
                 }
 
                 documents.Add(document);
@@ -133,6 +171,61 @@ namespace UnityGitTool
                 }
             }
             return list;
+        }
+
+        /// <summary>Same walk as <see cref="ParseMapping"/>, used only for a document's top-level
+        /// field block, additionally recording each key's <see cref="LineSpan"/>. Deliberately a
+        /// separate method rather than a flag on <see cref="ParseMapping"/> itself: nested mappings
+        /// (inside a Vector3, a list item, ...) have no meaningful span to record — write-back only
+        /// ever replaces a whole top-level field — so duplicating this one level keeps that general,
+        /// widely-reused recursive parser untouched and exactly as before.</summary>
+        private static (Dictionary<string, object> Fields, Dictionary<string, LineSpan> Spans) ParseMappingWithSpans(
+            string[] lines, ref int index, int indent)
+        {
+            var map = new Dictionary<string, object>();
+            var spans = new Dictionary<string, LineSpan>();
+            while (true)
+            {
+                SkipBlank(lines, ref index);
+                if (index >= lines.Length || CountIndent(lines[index]) != indent) break;
+                var trimmed = lines[index].TrimStart();
+                if (IsSequenceLine(trimmed) || DocumentHeader.IsMatch(lines[index])) break;
+
+                var colon = FindKeyColon(trimmed);
+                if (colon < 0) break;
+                var key = trimmed.Substring(0, colon).Trim();
+                var valuePart = trimmed.Substring(colon + 1).Trim();
+                var fieldStart = index;
+                index++;
+
+                if (valuePart.Length > 0)
+                {
+                    map[key] = ParseScalar(valuePart);
+                    spans[key] = new LineSpan(fieldStart, index);
+                    continue;
+                }
+
+                SkipBlank(lines, ref index);
+                if (index < lines.Length)
+                {
+                    var childIndent = CountIndent(lines[index]);
+                    if (childIndent > indent)
+                    {
+                        map[key] = ParseNodeAt(lines, ref index, childIndent);
+                        spans[key] = new LineSpan(fieldStart, index);
+                        continue;
+                    }
+                    if (childIndent == indent && IsSequenceLine(lines[index].TrimStart()))
+                    {
+                        map[key] = ParseSequence(lines, ref index, indent);
+                        spans[key] = new LineSpan(fieldStart, index);
+                        continue;
+                    }
+                }
+                map[key] = null;
+                spans[key] = new LineSpan(fieldStart, index);
+            }
+            return (map, spans);
         }
 
         private static Dictionary<string, object> ParseMapping(string[] lines, ref int index, int indent)

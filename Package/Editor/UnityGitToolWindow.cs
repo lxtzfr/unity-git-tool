@@ -23,7 +23,7 @@ namespace UnityGitTool
         private Column _columnResult;
         private Column _columnActions;
         private List<MockRow> _currentRows = new();
-        private bool _onlyConflicts;
+        private MockNode _selectedNode;
         // Diff vs Merge (see Header.cs's SetMode). A conflict warning only means something once
         // there's a Result to pick — in plain Diff mode every differing field would show one (no
         // 3-way base to tell an auto-mergeable change from a real conflict, see UnityYamlDiffBuilder),
@@ -95,25 +95,8 @@ namespace UnityGitTool
 
         private void RefreshTable()
         {
-            _table.itemsSource = _onlyConflicts ? FilterConflictsKeepingHeaders(_currentRows) : _currentRows;
+            _table.itemsSource = _currentRows;
             _table.Rebuild();
-        }
-
-        /// <summary>"Only conflicts" on a flat list that also contains component-header rows: keep a
-        /// header only when at least one row under it survives the filter, so a component with no
-        /// conflicts doesn't leave a dangling, section-less header behind.</summary>
-        private static List<MockRow> FilterConflictsKeepingHeaders(List<MockRow> rows)
-        {
-            var result = new List<MockRow>();
-            MockRow pendingHeader = null;
-            foreach (var row in rows)
-            {
-                if (row.IsHeader) { pendingHeader = row; continue; }
-                if (!row.IsConflict) continue;
-                if (pendingHeader != null) { result.Add(pendingHeader); pendingHeader = null; }
-                result.Add(row);
-            }
-            return result;
         }
 
         private static Texture2D GetIcon(string name)

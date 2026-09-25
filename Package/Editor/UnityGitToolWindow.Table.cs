@@ -129,7 +129,14 @@ namespace UnityGitTool
                         // there (e.g. a clean deletion) means the field genuinely doesn't exist
                         // anymore, so it must NOT fall back to A/B like the conflict case does.
                         var seed = data.IsConflict ? data.Result ?? data.ValueA ?? data.ValueB : data.Result;
-                        var field = FieldFactory.Create(seed, enabled: true, onValueChanged: v => data.Result = v);
+                        // A direct edit is a real value but not one UnityYamlWriter can safely
+                        // re-serialize back into YAML (see MockResolution.Manual) — excluded from
+                        // write-back and reported rather than guessed at.
+                        var field = FieldFactory.Create(seed, enabled: true, onValueChanged: v =>
+                        {
+                            data.Result = v;
+                            data.Resolution = MockResolution.Manual;
+                        });
                         element.Add(field);
                     }
                     else
@@ -182,17 +189,17 @@ namespace UnityGitTool
                     element.EnableInClassList("gt-row-header", data.IsHeader);
                     if (data.IsHeader) return; // nothing to take/revert on a section bar
 
-                    var takeA = new Button(() => { data.Result = data.ValueA; _table.RefreshItems(); }) { text = "A" };
+                    var takeA = new Button(() => { data.Result = data.ValueA; data.Resolution = MockResolution.A; _table.RefreshItems(); }) { text = "A" };
                     takeA.AddToClassList("gt-action-button");
                     takeA.tooltip = data.ValueA != null ? "Take A's value" : "Take A's value (doesn't exist — resolves to deleted)";
                     element.Add(takeA);
 
-                    var takeB = new Button(() => { data.Result = data.ValueB; _table.RefreshItems(); }) { text = "B" };
+                    var takeB = new Button(() => { data.Result = data.ValueB; data.Resolution = MockResolution.B; _table.RefreshItems(); }) { text = "B" };
                     takeB.AddToClassList("gt-action-button");
                     takeB.tooltip = data.ValueB != null ? "Take B's value" : "Take B's value (doesn't exist — resolves to deleted)";
                     element.Add(takeB);
 
-                    var revert = new Button(() => { data.Result = null; _table.RefreshItems(); });
+                    var revert = new Button(() => { data.Result = null; data.Resolution = MockResolution.Unresolved; _table.RefreshItems(); });
                     revert.AddToClassList("gt-action-button");
                     revert.AddToClassList("gt-icon-button");
                     revert.style.marginRight = 0; // last button — trailing space comes from the cell's own padding instead
@@ -206,15 +213,21 @@ namespace UnityGitTool
         /// <summary>Status color for a value cell's text: green when this side introduces the field
         /// (the other side is null, i.e. added), red when this side loses it (removed), orange when
         /// both sides have a value but differ (modified), or red when they differ AND the row is
-        /// still an unresolved conflict. Never shown on the Result column.</summary>
+        /// still an unresolved conflict. Never shown on the Result column. <see cref="MockRow.BIsOlderBaseline"/>
+        /// flips which side counts as "introduces"/"loses" the field: normally A is the reference/older
+        /// side and B is the one introducing a change (so missing-from-A reads as added), but for a
+        /// non-conflicted file's HEAD fallback (see UnityGitToolWindow.Tree.cs) A is the newer side and
+        /// B the older baseline it's compared against, so it's missing-from-B that reads as added.</summary>
         private static Color? GetStatusColor(MockRow row, ColumnSide side)
         {
             if (side == ColumnSide.Result) return null;
 
-            var added = row.ValueA == null;
-            var removed = row.ValueB == null;
-            if (added) return side == ColumnSide.B ? BadgeGreen : null;
-            if (removed) return side == ColumnSide.A ? BadgeRed : null;
+            var addedSide = row.BIsOlderBaseline ? ColumnSide.A : ColumnSide.B;
+            var removedSide = row.BIsOlderBaseline ? ColumnSide.B : ColumnSide.A;
+            var added = row.BIsOlderBaseline ? row.ValueB == null : row.ValueA == null;
+            var removed = row.BIsOlderBaseline ? row.ValueA == null : row.ValueB == null;
+            if (added) return side == addedSide ? BadgeGreen : null;
+            if (removed) return side == removedSide ? BadgeRed : null;
 
             var unresolved = row.IsConflict && row.Result == null;
             return unresolved ? BadgeRed : BadgeOrange; // both sides have a (different) value
