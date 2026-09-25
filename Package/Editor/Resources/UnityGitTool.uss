@@ -7,6 +7,10 @@
     padding: 6px 8px;
     border-bottom-width: 1px;
     border-bottom-color: rgba(0, 0, 0, 0.25);
+    /* Fixed chrome, not flexible content — without this, Yoga's default flex-shrink: 1 lets it get
+       squeezed whenever the tree/table need more vertical room than is available (e.g. one of them
+       needs a scrollbar), instead of leaving that squeeze to their own internal ScrollViews. */
+    flex-shrink: 0;
 }
 
 .gt-filter-group {
@@ -76,6 +80,7 @@
     background-color: rgba(128, 128, 128, 0.08);
     border-bottom-width: 1px;
     border-bottom-color: rgba(0, 0, 0, 0.15);
+    flex-shrink: 0; /* see .gt-toolbar */
 }
 
 .gt-panel-title Label {
@@ -213,6 +218,7 @@
     background-color: rgba(128, 128, 128, 0.08);
     border-top-width: 1px;
     border-top-color: rgba(0, 0, 0, 0.25);
+    flex-shrink: 0; /* see .gt-toolbar */
 }
 
 .gt-footer Label {
