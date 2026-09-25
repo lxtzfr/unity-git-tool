@@ -97,7 +97,7 @@ namespace UnityGitTool
             Dictionary<long, GitYamlDocument> byIdA,
             Dictionary<long, GitYamlDocument> byIdB)
         {
-            var rows = DiffFields(goA?.Fields, goB?.Fields, GameObjectIgnoredKeys);
+            var rows = DiffFields(goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB);
 
             var componentIds = CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct();
             var componentNodes = new List<TreeViewItemData<MockNode>>();
@@ -107,7 +107,7 @@ namespace UnityGitTool
                 byIdB.TryGetValue(compId, out var compB);
                 if ((compB ?? compA)?.Stripped != false) continue;
 
-                var compNode = BuildComponentNode(nextId, rowsByNodeId, compA, compB);
+                var compNode = BuildComponentNode(nextId, rowsByNodeId, compA, compB, byIdA, byIdB);
                 if (compNode.data.Badge != MockBadge.None) componentNodes.Add(compNode);
             }
 
@@ -131,10 +131,12 @@ namespace UnityGitTool
             Func<int> nextId,
             Dictionary<int, List<MockRow>> rowsByNodeId,
             GitYamlDocument compA,
-            GitYamlDocument compB)
+            GitYamlDocument compB,
+            Dictionary<long, GitYamlDocument> byIdA,
+            Dictionary<long, GitYamlDocument> byIdB)
         {
             var typeName = compB?.TypeName ?? compA?.TypeName ?? "Component";
-            var rows = DiffFields(compA?.Fields, compB?.Fields, ComponentIgnoredKeys);
+            var rows = DiffFields(compA?.Fields, compB?.Fields, ComponentIgnoredKeys, byIdA, byIdB);
             var badge = ResolveBadge(compA, compB, rows.Count > 0);
 
             var kind = typeName switch
@@ -187,7 +189,12 @@ namespace UnityGitTool
             }
         }
 
-        private static List<MockRow> DiffFields(Dictionary<string, object> fieldsA, Dictionary<string, object> fieldsB, HashSet<string> ignoredKeys)
+        private static List<MockRow> DiffFields(
+            Dictionary<string, object> fieldsA,
+            Dictionary<string, object> fieldsB,
+            HashSet<string> ignoredKeys,
+            Dictionary<long, GitYamlDocument> byIdA,
+            Dictionary<long, GitYamlDocument> byIdB)
         {
             var rows = new List<MockRow>();
             var keys = (fieldsA?.Keys ?? Enumerable.Empty<string>()).Concat(fieldsB?.Keys ?? Enumerable.Empty<string>()).Distinct();
@@ -206,10 +213,10 @@ namespace UnityGitTool
                 rows.Add(new MockRow
                 {
                     Property = UnityYamlFieldNames.Humanize(key),
-                    ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA) : null,
-                    ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB) : null,
+                    ValueA = hasA ? UnityYamlValueConverter.ToDisplayValue(rawA, byIdA) : null,
+                    ValueB = hasB ? UnityYamlValueConverter.ToDisplayValue(rawB, byIdB) : null,
                     IsConflict = isConflict,
-                    Result = isConflict ? null : UnityYamlValueConverter.ToDisplayValue(hasA ? rawA : rawB),
+                    Result = isConflict ? null : UnityYamlValueConverter.ToDisplayValue(hasA ? rawA : rawB, hasA ? byIdA : byIdB),
                 });
             }
             return rows;
