@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using UnityEditor.UIElements;
 using UnityEngine.UIElements;
 
@@ -7,12 +6,6 @@ namespace UnityGitTool
     /// <summary>Toolbar: revision pickers (A/B), manual refresh, Diff/Merge mode, and filter pills.</summary>
     public partial class UnityGitToolWindow
     {
-        private static readonly Dictionary<string, string[]> MockBranchCommits = new()
-        {
-            ["main"] = new[] { "a1b2c3d Fix material swap", "9f8e7d6 Adjust rotation" },
-            ["feature/pushback-tug-fix"] = new[] { "d4e5f6a Tune pushback speed" },
-        };
-
         private VisualElement BuildHeader()
         {
             var toolbar = new VisualElement();
@@ -103,7 +96,10 @@ namespace UnityGitTool
 
         /// <summary>HEAD / Working Tree pinned at top, then one submenu per branch containing that
         /// branch's tip plus its recent commits — mirrors how a real git revision picker nests
-        /// commits under the branch they belong to, instead of one unrelated flat commit list.</summary>
+        /// commits under the branch they belong to, instead of one unrelated flat commit list.
+        /// The submenu label carries the commit's subject for readability, but the value passed to
+        /// <paramref name="onChange"/> (and shown once selected) is always a real git revision —
+        /// the branch name or the commit hash — never that display text.</summary>
         private static ToolbarMenu BuildRevisionMenu(string initialValue, System.Action<string> onChange)
         {
             var menu = new ToolbarMenu { text = initialValue };
@@ -116,16 +112,16 @@ namespace UnityGitTool
             }
 
             menu.menu.AppendAction("HEAD", _ => Select("HEAD"));
-            menu.menu.AppendAction("Working Tree", _ => Select("Working Tree"));
+            menu.menu.AppendAction(GitFileReader.WorkingTree, _ => Select(GitFileReader.WorkingTree));
             menu.menu.AppendSeparator("");
-            foreach (var (branch, commits) in MockBranchCommits)
+            foreach (var branch in GitFileReader.ListBranches())
             {
-                var branchName = branch;
+                var branchName = branch.Name;
                 menu.menu.AppendAction($"{branchName}/(tip)", _ => Select(branchName));
-                foreach (var commit in commits)
+                foreach (var commit in GitFileReader.ListCommits(branchName))
                 {
-                    var captured = commit;
-                    menu.menu.AppendAction($"{branchName}/{captured}", _ => Select(captured));
+                    var hash = commit.Hash;
+                    menu.menu.AppendAction($"{branchName}/{commit}", _ => Select(hash));
                 }
             }
             return menu;

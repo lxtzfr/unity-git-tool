@@ -26,7 +26,7 @@ namespace UnityGitTool
         private bool _onlyConflicts;
         private Label _statusLabel;
 
-        private const string WorkingTree = "Working Tree";
+        private const string WorkingTree = GitFileReader.WorkingTree;
         private string _revisionA = "HEAD";
         private string _revisionB = WorkingTree;
 
