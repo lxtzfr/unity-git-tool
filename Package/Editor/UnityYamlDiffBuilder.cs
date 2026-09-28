@@ -160,15 +160,57 @@ namespace UnityGitTool
             var transform = byIdB.GetValueOrDefault(transformId.Value) ?? byIdA.GetValueOrDefault(transformId.Value);
             if (transform == null) return 0;
             if (!transform.Fields.TryGetValue("m_Father", out var fatherRef) || fatherRef is not Dictionary<string, object> fatherMap) return 0;
-            if (!fatherMap.TryGetValue("fileID", out var rawFatherId) || rawFatherId is not string fatherIdStr ||
-                !long.TryParse(fatherIdStr, out var fatherTransformId) || fatherTransformId == 0) return 0;
+            if (!TryGetFileId(fatherMap, out var fatherTransformId) || fatherTransformId == 0) return 0;
 
-            var fatherTransform = byIdB.GetValueOrDefault(fatherTransformId) ?? byIdA.GetValueOrDefault(fatherTransformId);
-            if (fatherTransform == null || !fatherTransform.Fields.TryGetValue("m_GameObject", out var ownerRef) ||
-                ownerRef is not Dictionary<string, object> ownerMap) return 0;
-            if (!ownerMap.TryGetValue("fileID", out var rawOwnerId) || rawOwnerId is not string ownerIdStr ||
-                !long.TryParse(ownerIdStr, out var ownerId)) return 0;
-            return ownerId;
+            return ResolveTransformOwnerGameObjectId(fatherTransformId, byIdA, byIdB, new HashSet<long>());
+        }
+
+        /// <summary>Resolves the GameObject FileId that owns Transform/RectTransform <paramref
+        /// name="transformId"/>. An ordinary transform carries its owner directly via <c>m_GameObject</c>.
+        /// A STRIPPED transform (see <see cref="GitYamlDocument.Stripped"/>) carries no such field —
+        /// it's a placeholder for an object that actually lives inside a nested prefab, so there's
+        /// nothing here to point back at a real GameObject document in this file. What it does carry is
+        /// <c>m_PrefabInstance</c>, and that PrefabInstance document's own
+        /// <c>m_Modification.m_TransformParent</c> is the real outer-scene anchor: wherever the WHOLE
+        /// nested prefab instance is parented in THIS file — not the stripped object's own
+        /// (unrepresented) position inside that prefab's internal hierarchy, which this tool never opens
+        /// or models as tree nodes anyway. That's the best fidelity achievable without parsing the
+        /// referenced prefab asset: an object added/changed deep inside a prefab instance nests under
+        /// the instance's own attachment point instead of being misread as parentless and dumped at the
+        /// file root (the bug this method fixes — see the "Vertical" GameObject case, an override added
+        /// under a corresponding-source object several levels inside a PrefabInstance whose stripped
+        /// placeholder has no <c>m_GameObject</c> of its own). Recurses since the resolved anchor can
+        /// itself be another stripped transform (a prefab instantiated inside another prefab instance);
+        /// <paramref name="visited"/> guards against a malformed/cyclic reference chain.</summary>
+        private static long ResolveTransformOwnerGameObjectId(long transformId, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB, HashSet<long> visited)
+        {
+            if (!visited.Add(transformId)) return 0;
+
+            var transform = byIdB.GetValueOrDefault(transformId) ?? byIdA.GetValueOrDefault(transformId);
+            if (transform == null) return 0;
+
+            if (transform.Fields.TryGetValue("m_GameObject", out var ownerRef) &&
+                ownerRef is Dictionary<string, object> ownerMap && TryGetFileId(ownerMap, out var ownerId))
+                return ownerId;
+
+            if (!transform.Stripped) return 0;
+            if (!transform.Fields.TryGetValue("m_PrefabInstance", out var instanceRef) ||
+                instanceRef is not Dictionary<string, object> instanceMap ||
+                !TryGetFileId(instanceMap, out var instanceId) || instanceId == 0) return 0;
+
+            var prefabInstance = byIdB.GetValueOrDefault(instanceId) ?? byIdA.GetValueOrDefault(instanceId);
+            if (prefabInstance == null ||
+                !prefabInstance.Fields.TryGetValue("m_Modification", out var modRaw) || modRaw is not Dictionary<string, object> modMap ||
+                !modMap.TryGetValue("m_TransformParent", out var parentRef) || parentRef is not Dictionary<string, object> parentMap ||
+                !TryGetFileId(parentMap, out var parentTransformId) || parentTransformId == 0) return 0;
+
+            return ResolveTransformOwnerGameObjectId(parentTransformId, byIdA, byIdB, visited);
+        }
+
+        private static bool TryGetFileId(Dictionary<string, object> map, out long fileId)
+        {
+            fileId = 0;
+            return map.TryGetValue("fileID", out var raw) && raw is string s && long.TryParse(s, out fileId);
         }
 
         internal static long? FindTransformId(long gameObjectId, Dictionary<long, GitYamlDocument> byId)

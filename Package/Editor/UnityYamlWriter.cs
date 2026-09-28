@@ -63,6 +63,7 @@ namespace UnityGitTool
             var edits = new List<LineEdit>();
             edits.AddRange(BuildDeletionEdits(toDelete, baseById, skipped));
             edits.AddRange(BuildReferenceCleanupEdits(toDelete, componentOwners, childParents, baseById, baseLines, skipped));
+            edits.AddRange(BuildDanglingReferenceCleanupEdits(toDelete, baseById, baseLines));
             if (restoredIds != null)
                 edits.AddRange(BuildRestoreEdits(new HashSet<long>(restoredIds), baseById, otherById, otherLines, baseLines, skipped));
             edits.AddRange(BuildFieldEdits(rows, toDelete, baseById, otherById, otherLines, skipped));
@@ -247,6 +248,52 @@ namespace UnityGitTool
             yield return new LineEdit(span.Start, span.End - span.Start, new List<string> { $"{indent}{fieldKey}: []" });
         }
 
+        /// <summary>Matches a local `{fileID: N}` reference — same as <see cref="LocalFileIdPattern"/>
+        /// (a plain scan of the raw text rather than a parsed value, so it catches a reference no
+        /// matter how deep it sits — a scalar field, or an entry inside a list of references — without
+        /// needing to walk the parsed structure).</summary>
+        private static readonly System.Text.RegularExpressions.Regex FileIdValuePattern = new(@"fileID:\s*(-?\d+)");
+
+        /// <summary><see cref="BuildReferenceCleanupEdits"/> only ever cleans up the two relationships
+        /// <see cref="CollectDeletionCascade"/> explicitly tracks — a component's owning GameObject's
+        /// `m_Component`, a child GameObject's parent's `m_Children`. Anything ELSE in the file that
+        /// happens to reference one of <paramref name="toDelete"/> — a script field on some unrelated
+        /// component (e.g. a `_canvas: {fileID: X}` pointing at the GameObject just deleted) — was
+        /// never touched, left silently dangling until Unity's own loader found it later and either
+        /// logged "Broken text PPtr ... doesn't exist!" or, for a duplicate list entry, "has multiple
+        /// entries of the same Object component. Removing it!". This is the general sweep that catches
+        /// those too: every surviving document's own fields (skipping <c>m_Component</c>/<c>m_Children</c>,
+        /// already handled precisely above — scanning them again here would double-edit the same
+        /// lines) are scanned for a local `{fileID: N}` with N in <paramref name="toDelete"/>, and that
+        /// N is zeroed out to Unity's own "no reference" sentinel — valid on both a scalar reference
+        /// field and a list entry (an array with a null slot is normal, unlike a bare fileID pointing
+        /// at nothing), so this never needs to know which shape a given field is.</summary>
+        private static IEnumerable<LineEdit> BuildDanglingReferenceCleanupEdits(
+            HashSet<long> toDelete, Dictionary<long, GitYamlDocument> baseById, List<string> baseLines)
+        {
+            if (toDelete.Count == 0) yield break;
+
+            foreach (var doc in baseById.Values)
+            {
+                if (doc.TypeName == null || toDelete.Contains(doc.FileId)) continue; // a document being deleted itself needs no field-level cleanup
+
+                foreach (var (key, span) in doc.FieldSpans)
+                {
+                    if (key is "m_Component" or "m_Children") continue; // already handled precisely by BuildReferenceCleanupEdits
+
+                    for (var i = span.Start; i < span.End; i++)
+                    {
+                        var line = baseLines[i];
+                        if (line.Contains("guid:")) continue; // external asset reference — its fileID is a sub-asset index, not a local document id
+
+                        var replaced = FileIdValuePattern.Replace(line, m =>
+                            long.TryParse(m.Groups[1].Value, out var id) && toDelete.Contains(id) ? "fileID: 0" : m.Value);
+                        if (replaced != line) yield return new LineEdit(i, 1, new List<string> { replaced });
+                    }
+                }
+            }
+        }
+
         /// <summary>The inverse of <see cref="CollectDeletionCascade"/>/<see cref="BuildReferenceCleanupEdits"/>
         /// — brings back a document (GameObject or component) that doesn't exist in <paramref name="baseById"/>
         /// yet, copying its raw block verbatim from <paramref name="otherLines"/> and re-linking it into
@@ -258,7 +305,12 @@ namespace UnityGitTool
         /// plus every one of its own components). An id whose owner is ALSO missing from the working tree
         /// and not itself in <paramref name="toRestore"/> is reported rather than left dangling or
         /// silently cascaded further — restoring an entire orphaned subtree automatically risks pulling in
-        /// far more than the user actually clicked.</summary>
+        /// far more than the user actually clicked. The one exception is nested-prefab bookkeeping (a
+        /// stripped placeholder or its anchoring PrefabInstance document) that a restored document's own
+        /// lines point at — see <see cref="CollectStructuralDependencies"/> for why that specific case IS
+        /// auto-pulled in: the user has no tree node to click-restore it from, and skipping it would just
+        /// leave a dangling reference ("Broken text PPtr ... doesn't exist!" on next scene load) inside
+        /// the very document this method just wrote back.</summary>
         private static IEnumerable<LineEdit> BuildRestoreEdits(
             HashSet<long> toRestore, Dictionary<long, GitYamlDocument> baseById, Dictionary<long, GitYamlDocument> otherById,
             List<string> otherLines, List<string> baseLines, List<string> skipped)
@@ -266,11 +318,21 @@ namespace UnityGitTool
             var missing = toRestore.Where(id => !baseById.ContainsKey(id)).ToList();
             if (missing.Count == 0) yield break;
 
-            // Copy each missing document's raw block verbatim, all appended together at the very end
-            // of the file — Unity doesn't care about document order, only fileID references (which is
-            // exactly what the owner-list fixups below take care of), so this is always a safe
-            // insertion point regardless of the surrounding structure.
-            var toAppend = new List<string>();
+            // A restored document's own raw lines can reference nested-prefab bookkeeping (a stripped
+            // placeholder, or the PrefabInstance anchoring one) that isn't itself in `missing` — e.g.
+            // restoring a GameObject whose Transform.m_Children lists a stripped placeholder for a
+            // PrefabInstance's root, or whose MonoBehaviour fields point at further stripped
+            // placeholders inside that same instance. See CollectStructuralDependencies for why these
+            // are always safe to pull in automatically (unlike real content, which stays reported
+            // instead — same call).
+            var allRestored = missing.Concat(CollectStructuralDependencies(missing, baseById, otherById, otherLines, skipped)).ToList();
+
+            // Each missing document's raw block, verbatim — re-inserted near where it used to sit (see
+            // BuildRestoreInsertionEdits below) rather than always at the end of the file. Unity itself
+            // doesn't care about document order (only fileID references, which the owner-list fixups
+            // below take care of), but git and reviewers do: dumping everything at end-of-file turns a
+            // one-GameObject rollback into a diff that looks like most of the scene changed.
+            var blockById = new Dictionary<long, List<string>>();
             var ownerFixups = new Dictionary<(long OwnerDocId, string FieldKey), List<long>>();
 
             void AddFixup(long ownerDocId, string fieldKey, long targetId)
@@ -280,20 +342,29 @@ namespace UnityGitTool
                 list.Add(targetId);
             }
 
-            foreach (var id in missing)
+            foreach (var id in allRestored)
             {
                 if (!otherById.TryGetValue(id, out var doc))
                 {
                     skipped.Add($"object #{id}: marked for restore but not found on the other side — not applied");
                     continue;
                 }
-                toAppend.AddRange(otherLines.GetRange(doc.HeaderLine, doc.BodyEndLine - doc.HeaderLine));
+                blockById[id] = otherLines.GetRange(doc.HeaderLine, doc.BodyEndLine - doc.HeaderLine);
 
                 if (doc.TypeName == "GameObject") continue; // linked into its parent below, once every restored id's own doc is known
+                // A stripped placeholder (or the PrefabInstance anchoring one) is never listed in any
+                // GameObject's m_Component — it's found purely by fileID from whichever document already
+                // references it (already copied verbatim above), so it needs no owner-list fixup at all.
+                if (doc.Stripped || doc.TypeName == "PrefabInstance") continue;
 
                 var ownerId = doc.Fields.TryGetValue("m_GameObject", out var raw) && raw is Dictionary<string, object> map &&
                     map.TryGetValue("fileID", out var rawId) && rawId is string s && long.TryParse(s, out var owner) ? owner : 0;
                 if (ownerId == 0) { skipped.Add($"{doc.TypeName} #{id}: couldn't resolve its owning GameObject — not linked back in"); continue; }
+                // A stripped owner (Unity's PrefabInstance.m_AddedComponents case — see
+                // IsPrefabBoundDependency) has no m_Component list to append into at all; Unity finds
+                // this component via the owning PrefabInstance's own m_AddedComponents entry instead,
+                // already copied verbatim once that PrefabInstance is restored — nothing to fix up here.
+                if (otherById.TryGetValue(ownerId, out var ownerDoc) && ownerDoc.Stripped) continue;
                 // The owner is being restored in this same batch — its copied m_Component list (raw,
                 // from `other`) already references this component verbatim, nothing extra to add.
                 if (missing.Contains(ownerId)) continue;
@@ -335,8 +406,258 @@ namespace UnityGitTool
                 foreach (var edit in BuildReferenceAddEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
                     yield return edit;
 
-            if (toAppend.Count > 0)
-                yield return new LineEdit(baseLines.Count, 0, toAppend);
+            foreach (var edit in BuildRestoreInsertionEdits(blockById, baseById, otherById, baseLines.Count))
+                yield return edit;
+        }
+
+        /// <summary>Places each restored document's raw block back near where it used to sit in
+        /// <paramref name="otherById"/>'s own file order, instead of always at end-of-file: walks that
+        /// order to find the nearest SURVIVING neighbor (a document present in <paramref name="baseById"/>)
+        /// immediately before it, and inserts right after that neighbor's own content
+        /// (<see cref="GitYamlDocument.BodyEndLine"/>) — same place Unity itself would have written it
+        /// back, had it not been deleted. Falls back to inserting right before the nearest surviving
+        /// neighbor AFTER it when nothing survives before it (e.g. it was the very first document in the
+        /// file), and to <paramref name="endOfFileLine"/> only when no surviving document exists on
+        /// either side at all. Multiple restored documents that land on the very same anchor point are
+        /// grouped into one insert, in their own original relative order, so two docs that used to be
+        /// adjacent still come back adjacent instead of merely both "somewhere near" the anchor.</summary>
+        private static IEnumerable<LineEdit> BuildRestoreInsertionEdits(
+            Dictionary<long, List<string>> blockById, Dictionary<long, GitYamlDocument> baseById,
+            Dictionary<long, GitYamlDocument> otherById, int endOfFileLine)
+        {
+            if (blockById.Count == 0) yield break;
+
+            var groups = new Dictionary<int, List<long>>();
+            foreach (var id in blockById.Keys)
+            {
+                var doc = otherById[id];
+                GitYamlDocument precedingSurvivor = null;
+                GitYamlDocument followingSurvivor = null;
+                foreach (var candidate in otherById.Values)
+                {
+                    if (!baseById.ContainsKey(candidate.FileId)) continue;
+                    if (candidate.HeaderLine < doc.HeaderLine)
+                    {
+                        if (precedingSurvivor == null || candidate.HeaderLine > precedingSurvivor.HeaderLine) precedingSurvivor = candidate;
+                    }
+                    else if (candidate.HeaderLine > doc.HeaderLine)
+                    {
+                        if (followingSurvivor == null || candidate.HeaderLine < followingSurvivor.HeaderLine) followingSurvivor = candidate;
+                    }
+                }
+
+                var anchorLine = precedingSurvivor != null ? baseById[precedingSurvivor.FileId].BodyEndLine
+                    : followingSurvivor != null ? baseById[followingSurvivor.FileId].HeaderLine
+                    : endOfFileLine;
+
+                if (!groups.TryGetValue(anchorLine, out var ids)) groups[anchorLine] = ids = new List<long>();
+                ids.Add(id);
+            }
+
+            foreach (var (anchorLine, ids) in groups)
+            {
+                var lines = new List<string>();
+                foreach (var id in ids.OrderBy(id => otherById[id].HeaderLine))
+                    lines.AddRange(blockById[id]);
+                yield return new LineEdit(anchorLine, 0, lines);
+            }
+        }
+
+        /// <summary>Nested-prefab bookkeeping (a stripped placeholder — see <see cref="GitYamlDocument.Stripped"/>
+        /// — or the PrefabInstance document anchoring one) that something in <paramref name="missing"/>
+        /// references but that isn't itself being restored. Neither ever gets its own tree node (a
+        /// stripped document is never shown as a GameObject — see <see cref="UnityYamlDiffBuilder"/> —
+        /// and a PrefabInstance has no changed-GameObject identity of its own either), so the user has no
+        /// way to click-restore them separately; leaving them out just recreates the exact "Broken text
+        /// PPtr ... doesn't exist!" dangling reference this whole path exists to avoid (the same failure
+        /// <see cref="FindDanglingLocalReference"/> guards a single field against for <see cref="BuildTakeBEdit"/>,
+        /// which this whole-document copy never went through).
+        ///
+        /// Two directions feed this closure, because the ownership between a PrefabInstance and its
+        /// stripped placeholders runs backwards from every other parent/child relationship in this file:
+        /// <list type="bullet">
+        /// <item>Forward — a restored document's own raw lines pointing AT a stripped placeholder or
+        /// PrefabInstance (e.g. a Transform's <c>m_Children</c>, a script's own field). Found by
+        /// <see cref="FindLocalReferences"/>, same as before.</item>
+        /// <item>Backward — once a PrefabInstance is included, EVERY stripped placeholder that declares
+        /// itself part of it via its own <c>m_PrefabInstance</c> field, even ones nothing we're restoring
+        /// happens to reference by name. A PrefabInstance document never lists its own overridden objects
+        /// (unlike a GameObject's <c>m_Component</c>) — the link only exists on each placeholder itself —
+        /// so restoring the PrefabInstance without ALL of them is exactly what Unity's loader logs as a
+        /// "broken PrefabInstance" and silently deletes, rather than erroring: the rollback bug this
+        /// second direction fixes.</item>
+        /// </list>
+        /// Both are always safe to pull in automatically: a stripped document carries no real content of
+        /// its own (only bookkeeping fields), and a PrefabInstance document is a self-contained blob of
+        /// overrides with nothing else to accidentally over-restore. Any OTHER dangling local reference
+        /// found this way — real content the user didn't ask for — is reported instead of auto-pulled in
+        /// or left dangling, same as every other guard in this class.</summary>
+        private static List<long> CollectStructuralDependencies(
+            List<long> missing, Dictionary<long, GitYamlDocument> baseById, Dictionary<long, GitYamlDocument> otherById,
+            List<string> otherLines, List<string> skipped)
+        {
+            // Every stripped placeholder in the WHOLE other-side file, grouped by the PrefabInstance it
+            // declares itself part of — built once up front so the backward direction above is a plain
+            // lookup instead of a full otherById scan per PrefabInstance encountered.
+            var strippedByInstance = new Dictionary<long, List<long>>();
+            foreach (var doc in otherById.Values)
+            {
+                if (!doc.Stripped || !TryGetReferenceFileId(doc, "m_PrefabInstance", out var ownerInstanceId)) continue;
+                if (!strippedByInstance.TryGetValue(ownerInstanceId, out var list)) strippedByInstance[ownerInstanceId] = list = new List<long>();
+                list.Add(doc.FileId);
+            }
+
+            var included = new HashSet<long>(missing);
+            var added = new List<long>();
+            var queue = new Queue<long>(missing);
+
+            void Include(long id)
+            {
+                if (id == 0 || baseById.ContainsKey(id) || !included.Add(id)) return;
+                added.Add(id);
+                queue.Enqueue(id);
+            }
+
+            var originalMissing = new HashSet<long>(missing);
+
+            // A GameObject pulled in only by this closure — never explicitly requested, so the caller
+            // (RollbackHeader) never listed its own components the way it does for a top-level restore
+            // click — needs its own real content cascaded WITH it: its own components, and its own real
+            // child GameObjects, recursively. Otherwise its copied m_Component/m_Children list would
+            // just dangle one level deeper, the exact failure this whole method exists to prevent —
+            // symmetric with CollectDeletionCascade's own unconditional recursive walk on the way out.
+            // Never applied to `originalMissing` itself: a top-level restore click deliberately does NOT
+            // cascade into child GameObjects (see this file's BuildRestoreEdits doc comment) — only
+            // content with no independent tree node of its own gets this treatment.
+            void IncludeOwnedContent(GitYamlDocument gameObject)
+            {
+                foreach (var compId in UnityYamlDiffBuilder.CollectComponentIds(gameObject)) Include(compId);
+
+                if (UnityYamlDiffBuilder.FindTransformId(gameObject.FileId, otherById) is not { } transformId ||
+                    !otherById.TryGetValue(transformId, out var transform) ||
+                    !transform.Fields.TryGetValue("m_Children", out var childrenRaw) || childrenRaw is not List<object> children) return;
+
+                foreach (var entry in children)
+                {
+                    if (entry is not Dictionary<string, object> childRef || !TryGetFileId(childRef, out var childTransformId)) continue;
+                    if (otherById.TryGetValue(childTransformId, out var childTransform) &&
+                        TryGetReferenceFileId(childTransform, "m_GameObject", out var childGoId))
+                        Include(childGoId);
+                }
+            }
+
+            while (queue.Count > 0)
+            {
+                if (!otherById.TryGetValue(queue.Dequeue(), out var doc)) continue;
+
+                if (doc.TypeName == "PrefabInstance")
+                {
+                    if (strippedByInstance.TryGetValue(doc.FileId, out var companions))
+                        foreach (var companionId in companions)
+                            Include(companionId);
+
+                    // This instance's own override footprint — objects/components Unity created
+                    // SPECIFICALLY for it (see CollectAddedObjectTargets) — is exactly as inseparable
+                    // from restoring the instance as the stripped companions above, whether or not the
+                    // target happens to be fully real content (m_AddedGameObjects) or stripped
+                    // (m_AddedComponents' owner always is). An m_AddedGameObjects target is the new
+                    // object's TRANSFORM id, not its GameObject — resolve to the owning GameObject too
+                    // so IncludeOwnedContent below picks up its own components/children once dequeued.
+                    foreach (var (targetId, isAddedGameObject) in CollectAddedObjectTargets(doc))
+                    {
+                        Include(targetId);
+                        if (isAddedGameObject && otherById.TryGetValue(targetId, out var targetTransform) &&
+                            TryGetReferenceFileId(targetTransform, "m_GameObject", out var addedGoId))
+                            Include(addedGoId);
+                    }
+                }
+
+                if (doc.TypeName == "GameObject" && !originalMissing.Contains(doc.FileId))
+                    IncludeOwnedContent(doc);
+
+                foreach (var refId in FindLocalReferences(otherLines, doc))
+                {
+                    if (refId == 0 || included.Contains(refId) || baseById.ContainsKey(refId)) continue;
+
+                    if (!otherById.TryGetValue(refId, out var refDoc) || !IsPrefabBoundDependency(refDoc, otherById))
+                    {
+                        skipped.Add($"{doc.TypeName} #{doc.FileId}: references object #{refId}, which doesn't exist in the working tree either — restore that too");
+                        continue;
+                    }
+
+                    Include(refId);
+                }
+            }
+
+            return added;
+        }
+
+        /// <summary>A PrefabInstance's own <c>m_Modification.m_AddedGameObjects</c>/<c>m_AddedComponents</c>
+        /// entries — each <c>addedObject</c> fileID it lists was created specifically for this instance's
+        /// override, so it's always safe (and, per <see cref="CollectStructuralDependencies"/>, necessary)
+        /// to restore alongside it. Distinguishes the two lists because an <c>m_AddedGameObjects</c>
+        /// entry's <c>addedObject</c> is the new object's TRANSFORM id (Unity's own convention — a
+        /// GameObject is identified by its Transform here, not its own fileID), while an
+        /// <c>m_AddedComponents</c> entry's <c>addedObject</c> is the component's own id directly.</summary>
+        private static IEnumerable<(long TargetId, bool IsAddedGameObject)> CollectAddedObjectTargets(GitYamlDocument prefabInstance)
+        {
+            if (!prefabInstance.Fields.TryGetValue("m_Modification", out var modRaw) || modRaw is not Dictionary<string, object> modMap)
+                yield break;
+
+            foreach (var (key, isAddedGameObject) in new[] { ("m_AddedGameObjects", true), ("m_AddedComponents", false) })
+            {
+                if (!modMap.TryGetValue(key, out var listRaw) || listRaw is not List<object> list) continue;
+                foreach (var entry in list)
+                    if (entry is Dictionary<string, object> entryMap && entryMap.TryGetValue("addedObject", out var addedRaw) &&
+                        addedRaw is Dictionary<string, object> addedMap && TryGetFileId(addedMap, out var addedId))
+                        yield return (addedId, isAddedGameObject);
+            }
+        }
+
+        private static bool TryGetReferenceFileId(GitYamlDocument doc, string key, out long fileId)
+        {
+            fileId = 0;
+            return doc.Fields.TryGetValue(key, out var raw) && raw is Dictionary<string, object> map && TryGetFileId(map, out fileId);
+        }
+
+        private static bool TryGetFileId(Dictionary<string, object> map, out long fileId)
+        {
+            fileId = 0;
+            return map.TryGetValue("fileID", out var rawId) && rawId is string s && long.TryParse(s, out fileId);
+        }
+
+        /// <summary>A document is nested-prefab plumbing with no independent tree node reachable by a
+        /// GENERIC field reference (a script field, a Transform's m_Father) — safe to auto-restore, same
+        /// reasoning as <see cref="CollectStructuralDependencies"/>'s own doc comment — when it's
+        /// Stripped, is the PrefabInstance anchoring one, OR is a fully real (non-stripped) COMPONENT
+        /// whose own <c>m_GameObject</c> owner is Stripped (Unity's <c>PrefabInstance.m_AddedComponents</c>
+        /// override — its owner is a stripped GameObject with no <c>m_Component</c> list of its own for
+        /// anything to reference it from; Unity discovers it via the PrefabInstance's own
+        /// <c>m_AddedComponents</c> list instead). A reference to an <c>m_AddedGameObjects</c> target
+        /// (a whole new real GameObject) is NOT decided here — that one IS a real, independently
+        /// diff-tree-visible GameObject in the general case, so a stray reference to one from unrelated
+        /// content stays reported rather than silently pulled in; it's only ever auto-included via
+        /// <see cref="CollectAddedObjectTargets"/>, scoped specifically to the PrefabInstance that owns
+        /// it, not any reference found anywhere.</summary>
+        private static bool IsPrefabBoundDependency(GitYamlDocument doc, Dictionary<long, GitYamlDocument> otherById)
+        {
+            if (doc.Stripped || doc.TypeName == "PrefabInstance") return true;
+            return doc.TypeName != "GameObject" && TryGetReferenceFileId(doc, "m_GameObject", out var ownerId) &&
+                otherById.TryGetValue(ownerId, out var ownerDoc) && ownerDoc.Stripped;
+        }
+
+        /// <summary>Every local (non-guid) <c>{fileID: N}</c> reference inside <paramref name="doc"/>'s
+        /// own line span — same <see cref="LocalFileIdPattern"/> match <see cref="FindDanglingLocalReference"/>
+        /// uses for a single field, applied here across a whole document's raw lines instead.</summary>
+        private static IEnumerable<long> FindLocalReferences(List<string> lines, GitYamlDocument doc)
+        {
+            for (var i = doc.HeaderLine; i < doc.BodyEndLine && i < lines.Count; i++)
+            {
+                var line = lines[i];
+                if (line.Contains("guid:")) continue;
+                foreach (System.Text.RegularExpressions.Match m in LocalFileIdPattern.Matches(line))
+                    if (long.TryParse(m.Groups[1].Value, out var id)) yield return id;
+            }
         }
 
         /// <summary>The inverse of <see cref="BuildReferenceRemovalEdits"/> — appends
@@ -410,16 +731,44 @@ namespace UnityGitTool
                         break;
 
                     case MockResolution.B:
-                        var edit = BuildTakeBEdit(baseDoc, hasBaseSpan, baseSpan, otherById, otherLines, row, skipped);
+                        var edit = BuildTakeBEdit(baseDoc, hasBaseSpan, baseSpan, baseById, otherById, otherLines, row, skipped);
                         if (edit.HasValue) yield return edit.Value;
                         break;
                 }
             }
         }
 
+        /// <summary>Matches a local `{fileID: N}` reference — one with no `guid:` on the same line,
+        /// meaning it points at another object inside this same file rather than a whole other asset
+        /// (a guid reference is always resolvable independently of this file's own content, so it's
+        /// never a dangling-reference risk the way a local one is).</summary>
+        private static readonly System.Text.RegularExpressions.Regex LocalFileIdPattern =
+            new(@"fileID:\s*(-?\d+)(?![^\n]*guid:)");
+
+        /// <summary>Splicing in a field's raw lines verbatim (see <see cref="BuildTakeBEdit"/>) can
+        /// silently create a dangling reference when that field itself IS (or contains, for an array)
+        /// one or more local object references — a `{fileID: N}` naming another document inside this
+        /// same file, not an external asset (see <see cref="LocalFileIdPattern"/>) — and N doesn't
+        /// exist on the side actually being written. Unity doesn't reject this at save time; it just
+        /// logs "Broken text PPtr ... doesn't exist!" and silently nulls the reference the next time
+        /// anything loads the file. Returns the first such id found, or null if every local reference
+        /// in <paramref name="lines"/> resolves.</summary>
+        private static long? FindDanglingLocalReference(List<string> lines, Dictionary<long, GitYamlDocument> baseById)
+        {
+            foreach (var line in lines)
+            {
+                foreach (System.Text.RegularExpressions.Match m in LocalFileIdPattern.Matches(line))
+                {
+                    if (!long.TryParse(m.Groups[1].Value, out var id) || id == 0) continue; // 0 = Unity's own "no reference" sentinel, always valid
+                    if (!baseById.ContainsKey(id)) return id;
+                }
+            }
+            return null;
+        }
+
         private static LineEdit? BuildTakeBEdit(
-            GitYamlDocument baseDoc, bool hasBaseSpan, LineSpan baseSpan, Dictionary<long, GitYamlDocument> otherById,
-            List<string> otherLines, MockRow row, List<string> skipped)
+            GitYamlDocument baseDoc, bool hasBaseSpan, LineSpan baseSpan, Dictionary<long, GitYamlDocument> baseById,
+            Dictionary<long, GitYamlDocument> otherById, List<string> otherLines, MockRow row, List<string> skipped)
         {
             if (!otherById.TryGetValue(baseDoc.FileId, out var otherDoc))
             {
@@ -440,6 +789,13 @@ namespace UnityGitTool
             var removeStart = hasBaseSpan ? baseSpan.Start : baseDoc.BodyEndLine;
             var removeCount = hasBaseSpan ? baseSpan.End - baseSpan.Start : 0;
             var insert = hasOtherSpan ? otherLines.GetRange(otherSpan.Start, otherSpan.End - otherSpan.Start) : new List<string>();
+
+            if (insert.Count > 0 && FindDanglingLocalReference(insert, baseById) is { } danglingId)
+            {
+                skipped.Add($"{baseDoc.TypeName} #{baseDoc.FileId} / {row.Property}: references object #{danglingId}, which doesn't exist in the working tree — not applied (would create a broken reference)");
+                return null;
+            }
+
             return new LineEdit(removeStart, removeCount, insert);
         }
     }

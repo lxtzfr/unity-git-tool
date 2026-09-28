@@ -167,10 +167,27 @@ namespace UnityGitTool
                     {
                         var key = rest.Substring(0, colon).Trim();
                         var value = rest.Substring(colon + 1).Trim();
-                        // Unity only ever emits single-key item maps for the cases this tool reads
-                        // (`- component: {fileID: X}`) — a genuine multi-key list item would need
-                        // its remaining keys read from further indented lines, which isn't needed here.
-                        list.Add(new Dictionary<string, object> { [key] = value.Length == 0 ? null : ParseScalar(value) });
+                        var map = new Dictionary<string, object> { [key] = value.Length == 0 ? null : ParseScalar(value) };
+
+                        // A genuine multi-key list item (e.g. PrefabInstance's own m_Modifications —
+                        // `- target: {...}` followed by sibling `propertyPath:`/`value:`/`objectReference:`
+                        // lines indented two spaces past the `-`) continues as more keys of this SAME
+                        // mapping, not a new sequence item or the enclosing mapping's next field. Without
+                        // this, the outer loop above sees the first continuation line's indent (> this
+                        // sequence's own indent) not matching `indent`, breaks immediately, and the
+                        // document is considered over right there — silently truncating everything after
+                        // it (component/GameObject content this list's OWNER document — the whole
+                        // PrefabInstance — needs preserved when copied verbatim, e.g. by
+                        // UnityYamlWriter's restore path).
+                        SkipBlank(lines, ref index);
+                        if (index < lines.Length && CountIndent(lines[index]) > indent && !IsSequenceLine(lines[index].TrimStart()))
+                        {
+                            var itemIndent = CountIndent(lines[index]);
+                            foreach (var kv in ParseMapping(lines, ref index, itemIndent))
+                                map[kv.Key] = kv.Value;
+                        }
+
+                        list.Add(map);
                     }
                     else
                     {
