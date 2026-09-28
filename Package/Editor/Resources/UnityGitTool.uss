@@ -139,6 +139,18 @@
     text-overflow: ellipsis;
 }
 
+/* Marked for deletion (see MockNode.MarkedForDeletion) in the Files tree only — dimmed + tinted
+   rather than struck through: USS text-decoration support varies by Unity version, opacity+color
+   doesn't. The Result tree (see UnityGitToolWindow.Tree.cs's BindTreeRow) instead colors the name
+   itself green/orange/red for Added/Modified/Deleted, set inline rather than through this class,
+   since the A/M/D chip is hidden there and the name is the only thing left to carry that signal.
+   Table header rows show delete state via the Result column's trash/restore toggle instead (see
+   UnityGitToolWindow.Table.cs) — the name itself never recolors there. */
+.gt-tree-label-deleted {
+    opacity: 0.5;
+    color: rgb(200, 90, 90);
+}
+
 .gt-cell {
     -unity-text-align: middle-left;
     padding: 0 8px;
@@ -199,6 +211,23 @@
     flex-grow: 1;
 }
 
+/* RectOffset's four axes (L/R/T/B) wrap onto a second line rather than overflowing the cell —
+   see FieldFactory.BuildRectOffsetField. */
+.gt-rectoffset-field {
+    flex-direction: row;
+    flex-wrap: wrap;
+    flex-grow: 1;
+}
+
+.gt-rectoffset-axis {
+    width: 56px;
+    margin-right: 4px;
+}
+
+.gt-rectoffset-axis > .unity-base-field__label {
+    min-width: 12px;
+}
+
 .gt-array-row {
     flex-direction: row;
     align-items: center;
@@ -210,12 +239,6 @@
     opacity: 0.6;
     font-size: 10px;
     flex-shrink: 0;
-}
-
-.gt-actions-cell {
-    flex-direction: row;
-    align-items: center;
-    padding: 4px 8px 4px 4px;
 }
 
 .gt-action-button {
