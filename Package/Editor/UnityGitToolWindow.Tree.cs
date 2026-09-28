@@ -56,14 +56,18 @@ namespace UnityGitTool
             // just because the parent happens to be selected. The table only ever shows a node's
             // own rows — selecting a file, or a GameObject that's only a structural ancestor of
             // the real change, shows nothing until you drill into the actual changed object.
-            if (node.Kind == MockNodeKind.GameObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
+            if (node.Kind is MockNodeKind.GameObject or MockNodeKind.PrefabInstance && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
             {
-                // A synthetic header row for the GameObject itself — carries "Delete GameObject" (see
-                // Table.cs), same idea as a component's own header row but for the object as a whole,
-                // which otherwise has no row of its own to hang that action on.
+                // A synthetic header row for the GameObject/PrefabInstance itself — carries "Delete
+                // GameObject" (see Table.cs; a PrefabInstance node has no delete action of its own in
+                // this pass, so GameObjectNode stays null for it — same idea as a component's own
+                // header row but for the object as a whole, which otherwise has no row of its own to
+                // hang that action on.
                 var gameObjectHeader = new MockRow
                 {
-                    IsHeader = true, Property = node.Label, HeaderIcon = "GameObject Icon", GameObjectNode = node,
+                    IsHeader = true, Property = node.Label,
+                    HeaderIcon = node.Kind == MockNodeKind.PrefabInstance ? "Prefab Icon" : "GameObject Icon",
+                    GameObjectNode = node.Kind == MockNodeKind.GameObject ? node : null,
                     HeaderStateA = node.HeaderStateA, HeaderStateB = node.HeaderStateB,
                 };
                 _currentRows = new List<MockRow> { gameObjectHeader };
@@ -256,6 +260,7 @@ namespace UnityGitTool
             {
                 MockNodeKind.SceneFile => "SceneAsset Icon",
                 MockNodeKind.PrefabFile => IsPrefabVariant(node.FilePath) ? "PrefabVariant Icon" : "Prefab Icon",
+                MockNodeKind.PrefabInstance => "Prefab Icon",
                 _ => "GameObject Icon",
             });
             label.text = node.Label;

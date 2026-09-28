@@ -128,19 +128,8 @@ namespace UnityGitTool
                 sourceMap.TryGetValue("guid", out var sourceGuid) && sourceGuid is string guid)
             {
                 var sourceFileId = sourceMap.TryGetValue("fileID", out var sfid) ? sfid as string : null;
-                if (sourceFileId != null && GlobalObjectId.TryParse($"GlobalObjectId_V1-3-{guid}-{sourceFileId}-0", out var goid))
-                {
-                    var precise = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(goid);
-                    if (precise != null) return precise;
-                }
-
-                var path = AssetDatabase.GUIDToAssetPath(guid);
-                if (!string.IsNullOrEmpty(path))
-                {
-                    var asset = AssetDatabase.LoadMainAssetAtPath(path);
-                    if (asset != null) return asset;
-                    return $"{Path.GetFileNameWithoutExtension(path)} ({document.TypeName})";
-                }
+                var resolved = ResolvePrefabSourceObjectName(guid, sourceFileId, document.TypeName);
+                if (resolved != null) return resolved;
             }
 
             if (document.TypeName == "GameObject")
@@ -157,6 +146,30 @@ namespace UnityGitTool
                 return $"{ownerNameStr} ({document.TypeName})";
             }
             return document.TypeName ?? "(unknown)";
+        }
+
+        /// <summary>Resolves a nested-prefab source reference (guid + local fileID within that
+        /// prefab asset) to the actual object it points at, via <see cref="GlobalObjectId"/> — precise
+        /// enough to resolve a SPECIFIC nested object (e.g. a "Body" component several levels inside
+        /// the prefab), not just the prefab's root. Shared by <see cref="DescribeLocalObject"/> (a
+        /// stripped placeholder's own <c>m_CorrespondingSourceObject</c>) and
+        /// <see cref="UnityYamlDiffBuilder"/> (a PrefabInstance override entry's own <c>target</c>) —
+        /// both carry the same guid+fileID shape. Falls back to the prefab asset's own main object,
+        /// then its filename, when the precise lookup itself can't resolve (e.g. the object was since
+        /// removed from the prefab); null only when the guid doesn't resolve to any asset at all.</summary>
+        internal static object ResolvePrefabSourceObjectName(string guid, string fileId, string typeNameFallback = null)
+        {
+            if (fileId != null && GlobalObjectId.TryParse($"GlobalObjectId_V1-3-{guid}-{fileId}-0", out var goid))
+            {
+                var precise = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(goid);
+                if (precise != null) return precise;
+            }
+
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            if (string.IsNullOrEmpty(path)) return null;
+            var asset = AssetDatabase.LoadMainAssetAtPath(path);
+            if (asset != null) return asset;
+            return typeNameFallback != null ? $"{Path.GetFileNameWithoutExtension(path)} ({typeNameFallback})" : Path.GetFileNameWithoutExtension(path);
         }
 
         private static bool HasKeys(Dictionary<string, object> map, params string[] keys) =>

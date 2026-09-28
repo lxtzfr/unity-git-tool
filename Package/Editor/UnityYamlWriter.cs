@@ -66,7 +66,7 @@ namespace UnityGitTool
             edits.AddRange(BuildDanglingReferenceCleanupEdits(toDelete, baseById, baseLines));
             if (restoredIds != null)
                 edits.AddRange(BuildRestoreEdits(new HashSet<long>(restoredIds), baseById, otherById, otherLines, baseLines, skipped));
-            edits.AddRange(BuildFieldEdits(rows, toDelete, baseById, otherById, otherLines, skipped));
+            edits.AddRange(BuildFieldEdits(rows, toDelete, baseById, baseLines, otherById, otherLines, skipped));
 
             // Descending by start: an edit only ever touches lines at or after its own recorded start,
             // so applying furthest-down-the-file first never shifts an earlier edit's still-pending
@@ -704,8 +704,8 @@ namespace UnityGitTool
         }
 
         private static IEnumerable<LineEdit> BuildFieldEdits(
-            List<MockRow> rows, HashSet<long> toDelete, Dictionary<long, GitYamlDocument> baseById, Dictionary<long, GitYamlDocument> otherById,
-            List<string> otherLines, List<string> skipped)
+            List<MockRow> rows, HashSet<long> toDelete, Dictionary<long, GitYamlDocument> baseById, List<string> baseLines,
+            Dictionary<long, GitYamlDocument> otherById, List<string> otherLines, List<string> skipped)
         {
             // A field belonging to a document that's being wholly deleted needs no edit of its own —
             // the whole document (and this field along with it) is already gone via BuildDeletionEdits.
@@ -731,7 +731,7 @@ namespace UnityGitTool
                         break;
 
                     case MockResolution.B:
-                        var edit = BuildTakeBEdit(baseDoc, hasBaseSpan, baseSpan, baseById, otherById, otherLines, row, skipped);
+                        var edit = BuildTakeBEdit(baseDoc, hasBaseSpan, baseSpan, baseById, baseLines, otherById, otherLines, row, skipped);
                         if (edit.HasValue) yield return edit.Value;
                         break;
                 }
@@ -767,7 +767,7 @@ namespace UnityGitTool
         }
 
         private static LineEdit? BuildTakeBEdit(
-            GitYamlDocument baseDoc, bool hasBaseSpan, LineSpan baseSpan, Dictionary<long, GitYamlDocument> baseById,
+            GitYamlDocument baseDoc, bool hasBaseSpan, LineSpan baseSpan, Dictionary<long, GitYamlDocument> baseById, List<string> baseLines,
             Dictionary<long, GitYamlDocument> otherById, List<string> otherLines, MockRow row, List<string> skipped)
         {
             if (!otherById.TryGetValue(baseDoc.FileId, out var otherDoc))
@@ -783,19 +783,43 @@ namespace UnityGitTool
                 return null;
             }
 
-            // Remove A's existing lines for this field (none, at BodyEndLine, when it doesn't exist
-            // in A — a pure insert), then splice in B's, verbatim, if it has any (none = a deletion,
-            // when B doesn't have the field either).
-            var removeStart = hasBaseSpan ? baseSpan.Start : baseDoc.BodyEndLine;
-            var removeCount = hasBaseSpan ? baseSpan.End - baseSpan.Start : 0;
             var insert = hasOtherSpan ? otherLines.GetRange(otherSpan.Start, otherSpan.End - otherSpan.Start) : new List<string>();
-
             if (insert.Count > 0 && FindDanglingLocalReference(insert, baseById) is { } danglingId)
             {
                 skipped.Add($"{baseDoc.TypeName} #{baseDoc.FileId} / {row.Property}: references object #{danglingId}, which doesn't exist in the working tree — not applied (would create a broken reference)");
                 return null;
             }
 
+            // A brand-new PrefabInstance override entry (see UnityYamlParser's per-entry
+            // m_Modification.m_Modifications spans) has no span of its own in base to anchor on — the
+            // generic BodyEndLine fallback below would append it after the WHOLE PrefabInstance
+            // document instead of inside its existing m_Modifications list. Anchor inside that list
+            // instead, same "expand [] to a real list" shape BuildReferenceAddEdits already uses for
+            // m_Component/m_Children.
+            if (!hasBaseSpan && row.Key != null && row.Key.StartsWith("m_Modification.m_Modifications::", System.StringComparison.Ordinal))
+            {
+                if (!baseDoc.FieldSpans.TryGetValue("m_Modification.m_Modifications", out var listSpan))
+                {
+                    skipped.Add($"{baseDoc.TypeName} #{baseDoc.FileId} / {row.Property}: no m_Modifications list found on this PrefabInstance — not applied");
+                    return null;
+                }
+
+                var keyLine = baseLines[listSpan.Start];
+                if (keyLine.TrimEnd().EndsWith("[]"))
+                {
+                    var indent = keyLine.Substring(0, keyLine.Length - keyLine.TrimStart().Length);
+                    var expanded = new List<string> { $"{indent}m_Modifications:" };
+                    expanded.AddRange(insert);
+                    return new LineEdit(listSpan.Start, 1, expanded);
+                }
+                return new LineEdit(listSpan.End, 0, insert);
+            }
+
+            // Remove A's existing lines for this field (none, at BodyEndLine, when it doesn't exist
+            // in A — a pure insert), then splice in B's, verbatim, if it has any (none = a deletion,
+            // when B doesn't have the field either).
+            var removeStart = hasBaseSpan ? baseSpan.Start : baseDoc.BodyEndLine;
+            var removeCount = hasBaseSpan ? baseSpan.End - baseSpan.Start : 0;
             return new LineEdit(removeStart, removeCount, insert);
         }
     }

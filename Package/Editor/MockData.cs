@@ -138,6 +138,10 @@ namespace UnityGitTool
         SceneFile,
         PrefabFile,
         GameObject,
+        /// <summary>A changed PrefabInstance document's own tree node — its overrides
+        /// (<c>m_Modification.m_Modifications</c>/removed-lists), not a real GameObject document of
+        /// its own. See <see cref="UnityYamlDiffBuilder.BuildPrefabInstanceSubtree"/>.</summary>
+        PrefabInstance,
     }
 
     internal enum MockBadge

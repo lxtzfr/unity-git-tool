@@ -83,7 +83,7 @@ namespace UnityGitTool
             // just to throw most of the result away isn't worth it. A "stripped" placeholder (see
             // GitYamlDocument.Stripped) never counts as changed regardless of add/remove status: it
             // has no real content of its own, only bookkeeping fields pointing at a nested prefab.
-            var changedIds = byIdA.Values.Concat(byIdB.Values)
+            var changedGameObjectIds = byIdA.Values.Concat(byIdB.Values)
                 .Where(d => d.TypeName == "GameObject")
                 .Select(d => d.FileId)
                 .Distinct()
@@ -93,6 +93,25 @@ namespace UnityGitTool
                     byIdB.TryGetValue(id, out var b);
                     return !(b ?? a).Stripped && HasGameObjectChanged(id, byIdA, byIdB);
                 });
+
+            // A changed PrefabInstance walks the exact same included/parentOf/childrenOf machinery
+            // below as a GameObject — GetParentGameObjectId already resolves either id shape to its
+            // real GameObject parent (see ResolvePrefabInstanceParentGameObjectId) — so both id kinds
+            // share one unified tree walk rather than a parallel structure. See
+            // BuildPrefabInstanceSubtree for why a PrefabInstance id is always a LEAF here (nothing in
+            // this file is ever parented under one in turn).
+            var changedPrefabInstanceIds = byIdA.Values.Concat(byIdB.Values)
+                .Where(d => d.TypeName == "PrefabInstance")
+                .Select(d => d.FileId)
+                .Distinct()
+                .Where(id =>
+                {
+                    byIdA.TryGetValue(id, out var a);
+                    byIdB.TryGetValue(id, out var b);
+                    return !(b ?? a).Stripped && HasPrefabInstanceChanged(id, byIdA, byIdB);
+                });
+
+            var changedIds = changedGameObjectIds.Concat(changedPrefabInstanceIds);
 
             // Each changed GameObject's full ancestor chain (via Transform.m_Father), unioned, so it
             // nests under its real parent all the way to the scene root instead of flattening onto the
@@ -124,7 +143,7 @@ namespace UnityGitTool
 
             var children = included
                 .Where(id => parentOf.GetValueOrDefault(id, 0) == 0)
-                .Select(rootId => BuildGameObjectSubtree(rootId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath))
+                .Select(rootId => BuildNodeSubtree(rootId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath))
                 .ToList();
 
             var nodeId = nextId();
@@ -154,6 +173,14 @@ namespace UnityGitTool
         /// object at all (added-in-A-only, i.e. removed on B).</summary>
         internal static long GetParentGameObjectId(long gameObjectId, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
         {
+            // A PrefabInstance id shares this same method (see BuildFileNode's changedIds, which now
+            // walks both GameObject and PrefabInstance ids to the scene root through one unified
+            // parent-of map) but has no Transform/RectTransform component of its own to look up — its
+            // whole-instance attach point is its own m_Modification.m_TransformParent directly.
+            var doc = byIdB.GetValueOrDefault(gameObjectId) ?? byIdA.GetValueOrDefault(gameObjectId);
+            if (doc?.TypeName == "PrefabInstance")
+                return ResolvePrefabInstanceParentGameObjectId(doc, byIdA, byIdB);
+
             var transformId = FindTransformId(gameObjectId, byIdB) ?? FindTransformId(gameObjectId, byIdA);
             if (transformId == null) return 0;
 
@@ -199,12 +226,25 @@ namespace UnityGitTool
                 !TryGetFileId(instanceMap, out var instanceId) || instanceId == 0) return 0;
 
             var prefabInstance = byIdB.GetValueOrDefault(instanceId) ?? byIdA.GetValueOrDefault(instanceId);
+            return ResolvePrefabInstanceParentGameObjectId(prefabInstance, byIdA, byIdB, visited);
+        }
+
+        /// <summary>A PrefabInstance's own whole-instance attach point — wherever the WHOLE nested
+        /// prefab instance is parented in this file, via its <c>m_Modification.m_TransformParent</c>.
+        /// Shared by <see cref="ResolveTransformOwnerGameObjectId"/> (a stripped transform's owning
+        /// instance) and <see cref="GetParentGameObjectId"/> (a changed PrefabInstance's own tree
+        /// position — see <see cref="BuildPrefabInstanceSubtree"/>), which both need exactly this same
+        /// resolution. Recurses (via <paramref name="visited"/>, shared with the caller so a cycle
+        /// across both methods is still guarded) since the resolved anchor can itself be another
+        /// stripped transform (a prefab instantiated inside another prefab instance).</summary>
+        private static long ResolvePrefabInstanceParentGameObjectId(GitYamlDocument prefabInstance, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB, HashSet<long> visited = null)
+        {
             if (prefabInstance == null ||
                 !prefabInstance.Fields.TryGetValue("m_Modification", out var modRaw) || modRaw is not Dictionary<string, object> modMap ||
                 !modMap.TryGetValue("m_TransformParent", out var parentRef) || parentRef is not Dictionary<string, object> parentMap ||
                 !TryGetFileId(parentMap, out var parentTransformId) || parentTransformId == 0) return 0;
 
-            return ResolveTransformOwnerGameObjectId(parentTransformId, byIdA, byIdB, visited);
+            return ResolveTransformOwnerGameObjectId(parentTransformId, byIdA, byIdB, visited ?? new HashSet<long>());
         }
 
         private static bool TryGetFileId(Dictionary<string, object> map, out long fileId)
@@ -246,6 +286,28 @@ namespace UnityGitTool
             return false;
         }
 
+        /// <summary>Dispatches a tree-walk id (see <see cref="BuildFileNode"/>'s <c>included</c> set,
+        /// which now mixes GameObject and PrefabInstance ids in one namespace) to the right subtree
+        /// builder by the document's own <see cref="GitYamlDocument.TypeName"/>.</summary>
+        private static TreeViewItemData<MockNode> BuildNodeSubtree(
+            long id,
+            Dictionary<long, List<long>> childrenOf,
+            Func<int> nextId,
+            Dictionary<int, List<MockRow>> rowsByNodeId,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
+            Dictionary<long, GitYamlDocument> byIdA,
+            Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline,
+            string filePath)
+        {
+            var doc = byIdB.GetValueOrDefault(id) ?? byIdA.GetValueOrDefault(id);
+            return doc?.TypeName == "PrefabInstance"
+                ? BuildPrefabInstanceSubtree(id, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath)
+                : BuildGameObjectSubtree(id, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath);
+        }
+
         /// <summary>One GameObject's node, plus every one of its own components' rows flattened onto
         /// it (component identity itself was never useful as a separate tree node — see the header
         /// row <see cref="BuildComponentRows"/> already prepends), plus, now, its actual child
@@ -276,7 +338,7 @@ namespace UnityGitTool
             var childItems = new List<TreeViewItemData<MockNode>>();
             if (childrenOf.TryGetValue(id, out var childIds))
                 foreach (var childId in childIds)
-                    childItems.Add(BuildGameObjectSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath));
+                    childItems.Add(BuildNodeSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath));
 
             // Write-back only ever patches revision A's own file (see UnityYamlWriter) — a row whose
             // object doesn't exist on the A side at all (FileId 0, Unity's own "no reference" sentinel,
@@ -372,6 +434,345 @@ namespace UnityGitTool
             rows.AddRange(fieldRows);
             return rows;
         }
+
+        /// <summary>One changed PrefabInstance's node — its property overrides
+        /// (<c>m_Modification.m_Modifications</c>, grouped by the object each override targets, per
+        /// the TODO), plus its removed/added component &amp; GameObject lists shown as single
+        /// list-valued rows (same idea as any other array field — see <see cref="AddListDiffRow"/>/
+        /// <see cref="AddAddedListDiffRow"/>). Always a LEAF here in practice — see
+        /// <see cref="BuildFileNode"/>'s own comment on why nothing is ever parented under a
+        /// PrefabInstance id — but still walks <paramref name="childrenOf"/> defensively, same shape
+        /// as <see cref="BuildGameObjectSubtree"/>, in case that assumption ever changes.</summary>
+        private static TreeViewItemData<MockNode> BuildPrefabInstanceSubtree(
+            long id,
+            Dictionary<long, List<long>> childrenOf,
+            Func<int> nextId,
+            Dictionary<int, List<MockRow>> rowsByNodeId,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
+            Dictionary<long, GitYamlDocument> byIdA,
+            Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline,
+            string filePath)
+        {
+            byIdA.TryGetValue(id, out var instanceA);
+            byIdB.TryGetValue(id, out var instanceB);
+            var instance = instanceB ?? instanceA;
+
+            var childItems = new List<TreeViewItemData<MockNode>>();
+            if (childrenOf.TryGetValue(id, out var childIds))
+                foreach (var childId in childIds)
+                    childItems.Add(BuildNodeSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath));
+
+            var sourceGuid = GetPrefabSourceGuid(instance);
+            var ownRows = BuildPrefabInstanceRows(id, instanceA, instanceB, sourceGuid, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
+
+            var badge = ResolveBadge(instanceA, instanceB, ownRows.Count > 0, bIsOlderBaseline);
+            var (headerStateA, headerStateB) = badge == MockBadge.None
+                ? (MockHeaderState.None, MockHeaderState.None)
+                : ResolveHeaderStates(instanceA == null, instanceB == null, bIsOlderBaseline);
+
+            var label = DescribeResolvedTarget(ResolvePrefabSourceRootObject(instance)) ?? "Prefab Instance";
+
+            var nodeId = nextId();
+            ownRowsByNodeId[nodeId] = ownRows;
+            rowsByNodeId[nodeId] = ownRows.Concat(childItems.SelectMany(c => rowsByNodeId.GetValueOrDefault(c.id) ?? new List<MockRow>())).ToList();
+            // A PrefabInstance node carries no "delete whole instance" action in this pass (unlike a
+            // GameObject's MarkedForDeletion) — nothing of its own to register here, only whatever its
+            // (currently always empty) descendants contribute, same aggregation shape as
+            // BuildGameObjectSubtree for consistency.
+            gameObjectNodesByNodeId[nodeId] = childItems.SelectMany(c => gameObjectNodesByNodeId.GetValueOrDefault(c.id) ?? new List<MockNode>()).ToList();
+
+            var node = new MockNode
+            {
+                Id = nodeId,
+                Label = label,
+                Kind = MockNodeKind.PrefabInstance,
+                FilePath = filePath,
+                FileId = id,
+                Badge = badge,
+                HeaderStateA = headerStateA,
+                HeaderStateB = headerStateB,
+                HasConflict = ownRows.Exists(r => r.IsConflict) || childItems.Any(c => c.data.HasConflict),
+            };
+            return new TreeViewItemData<MockNode>(nodeId, node, childItems);
+        }
+
+        /// <summary>Cheap "did this PrefabInstance change at all" check, mirroring
+        /// <see cref="HasGameObjectChanged"/>'s role for a GameObject — reused by both
+        /// <see cref="BuildFileNode"/>'s changedIds gathering and, implicitly, by
+        /// <see cref="BuildPrefabInstanceRows"/> doing the real per-field comparison. An override entry
+        /// present on only one side, or differing in content, counts — same for the four
+        /// added/removed lists (added-list changes only affect the display-only rows, but still mark
+        /// the instance as changed so the user sees them).</summary>
+        private static bool HasPrefabInstanceChanged(long id, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            byIdA.TryGetValue(id, out var a);
+            byIdB.TryGetValue(id, out var b);
+            if (a == null || b == null) return true;
+
+            var entriesA = GetModificationEntries(a);
+            var entriesB = GetModificationEntries(b);
+            foreach (var key in entriesA.Keys.Concat(entriesB.Keys).Distinct())
+            {
+                entriesA.TryGetValue(key, out var entryA);
+                entriesB.TryGetValue(key, out var entryB);
+                if (entryA == null || entryB == null || !YamlValuesEqual(entryA, entryB)) return true;
+            }
+
+            foreach (var fieldKey in new[] { "m_RemovedComponents", "m_RemovedGameObjects", "m_AddedGameObjects", "m_AddedComponents" })
+                if (!YamlValuesEqual(GetModificationList(a, fieldKey), GetModificationList(b, fieldKey))) return true;
+
+            return false;
+        }
+
+        /// <summary>Builds every row for one PrefabInstance's node: one header per distinct override
+        /// TARGET (grouping, per the TODO) with its changed property rows underneath, then the
+        /// removed/added list rows. <paramref name="instanceId"/> is used as every modification row's
+        /// <see cref="MockRow.FileId"/> — the PrefabInstance document itself, since that's where
+        /// <see cref="UnityYamlParser"/>'s <c>m_Modification.*</c> span tracking lives, matching what
+        /// <see cref="UnityYamlWriter"/>'s generic <c>(FileId, Key)</c> splice already expects.</summary>
+        private static List<MockRow> BuildPrefabInstanceRows(
+            long instanceId, GitYamlDocument instanceA, GitYamlDocument instanceB, string sourceGuid,
+            Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted, bool bIsOlderBaseline)
+        {
+            var rows = new List<MockRow>();
+
+            var entriesA = GetModificationEntries(instanceA);
+            var entriesB = GetModificationEntries(instanceB);
+            var changedByTarget = new Dictionary<string, List<(string PropertyPath, Dictionary<string, object> A, Dictionary<string, object> B)>>();
+
+            foreach (var key in entriesA.Keys.Concat(entriesB.Keys).Distinct())
+            {
+                entriesA.TryGetValue(key, out var entryA);
+                entriesB.TryGetValue(key, out var entryB);
+                if (entryA != null && entryB != null && YamlValuesEqual(entryA, entryB)) continue;
+
+                var separator = key.IndexOf("::", System.StringComparison.Ordinal);
+                var targetId = key.Substring(0, separator);
+                var propertyPath = key.Substring(separator + 2);
+                if (!changedByTarget.TryGetValue(targetId, out var list)) changedByTarget[targetId] = list = new();
+                list.Add((propertyPath, entryA, entryB));
+            }
+
+            foreach (var (targetId, entries) in changedByTarget)
+            {
+                var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
+                var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
+                rows.Add(new MockRow { IsHeader = true, Property = label, HeaderIcon = IconForModificationTarget(resolved) });
+
+                foreach (var (propertyPath, entryA, entryB) in entries)
+                {
+                    var hasA = entryA != null;
+                    var hasB = entryB != null;
+                    var valueA = hasA ? ResolveModificationValue(entryA, byIdA) : null;
+                    var valueB = hasB ? ResolveModificationValue(entryB, byIdB) : null;
+                    var isConflict = fileIsConflicted && hasA && hasB;
+
+                    rows.Add(new MockRow
+                    {
+                        Property = HumanizePropertyPath(propertyPath),
+                        FileId = instanceId,
+                        Key = $"m_Modification.m_Modifications::{targetId}::{propertyPath}",
+                        BIsOlderBaseline = bIsOlderBaseline,
+                        ValueA = valueA,
+                        ValueB = valueB,
+                        IsConflict = isConflict,
+                        Resolution = isConflict ? MockResolution.Unresolved : hasA ? MockResolution.A : MockResolution.B,
+                        Result = isConflict ? null : hasA ? valueA : valueB,
+                    });
+                }
+            }
+
+            AddListDiffRow(rows, instanceId, instanceA, instanceB, "m_RemovedComponents", "Removed Components", sourceGuid, fileIsConflicted, bIsOlderBaseline);
+            AddListDiffRow(rows, instanceId, instanceA, instanceB, "m_RemovedGameObjects", "Removed GameObjects", sourceGuid, fileIsConflicted, bIsOlderBaseline);
+            AddAddedListDiffRow(rows, instanceA, instanceB, "m_AddedGameObjects", "Added GameObjects", byIdA, byIdB);
+            AddAddedListDiffRow(rows, instanceA, instanceB, "m_AddedComponents", "Added Components", byIdA, byIdB);
+
+            return rows;
+        }
+
+        /// <summary>A whole-list row (<c>m_RemovedComponents</c>/<c>m_RemovedGameObjects</c>) — unlike
+        /// a per-target modification row, this is deliberately ONE row for the WHOLE list rather than
+        /// one row per removed id: <see cref="MockRow.Key"/> is the list's own compound span key (see
+        /// <see cref="UnityYamlParser"/>), and <see cref="UnityYamlWriter"/>'s Take-A/B always splices
+        /// a whole field's span — several rows sharing that same key would each independently try to
+        /// splice the same span, corrupting the file the second time. Members show as resolved names
+        /// (see <see cref="ResolveListDisplay"/>), not raw fileIDs, same as a modification target.</summary>
+        private static void AddListDiffRow(
+            List<MockRow> rows, long instanceId, GitYamlDocument instanceA, GitYamlDocument instanceB,
+            string fieldKey, string label, string sourceGuid, bool fileIsConflicted, bool bIsOlderBaseline)
+        {
+            var listA = GetModificationList(instanceA, fieldKey);
+            var listB = GetModificationList(instanceB, fieldKey);
+            if (YamlValuesEqual(listA, listB)) return;
+
+            var hasA = instanceA != null;
+            var hasB = instanceB != null;
+            var isConflict = fileIsConflicted && hasA && hasB;
+            var valueA = hasA ? ResolveListDisplay(listA, sourceGuid) : null;
+            var valueB = hasB ? ResolveListDisplay(listB, sourceGuid) : null;
+
+            rows.Add(new MockRow
+            {
+                Property = label,
+                FileId = instanceId,
+                Key = $"m_Modification.{fieldKey}",
+                BIsOlderBaseline = bIsOlderBaseline,
+                ValueA = valueA,
+                ValueB = valueB,
+                IsConflict = isConflict,
+                Resolution = isConflict ? MockResolution.Unresolved : hasA ? MockResolution.A : MockResolution.B,
+                Result = isConflict ? null : hasA ? valueA : valueB,
+            });
+        }
+
+        /// <summary>Same display idea as <see cref="AddListDiffRow"/> but for
+        /// <c>m_AddedGameObjects</c>/<c>m_AddedComponents</c> — deliberately informational only
+        /// (<see cref="MockRow.Key"/> left null, <see cref="MockRow.FileId"/> left 0): taking an
+        /// "added" override from one side into the other means synthesizing whole new
+        /// GameObject/component/stripped-placeholder documents that may not exist on the other side at
+        /// all, not splicing a field — a materially different write-back path
+        /// (<see cref="UnityYamlWriter.BuildRestoreEdits"/>-shaped, not <c>BuildTakeBEdit</c>-shaped)
+        /// left as a follow-up (see TODO.md). <see cref="UnityYamlWriter.BuildFieldEdits"/>'s own
+        /// <c>r.Key != null</c> filter already excludes a row like this from write-back for free.</summary>
+        private static void AddAddedListDiffRow(
+            List<MockRow> rows, GitYamlDocument instanceA, GitYamlDocument instanceB,
+            string fieldKey, string label, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            var listA = GetModificationList(instanceA, fieldKey);
+            var listB = GetModificationList(instanceB, fieldKey);
+            if (YamlValuesEqual(listA, listB)) return;
+
+            object[] Resolve(List<object> list, Dictionary<long, GitYamlDocument> byId) => list.Select(entry =>
+                entry is Dictionary<string, object> map && map.TryGetValue("addedObject", out var addedRaw) && addedRaw is Dictionary<string, object> addedMap
+                    ? UnityYamlValueConverter.ToDisplayValue(addedMap, byId)
+                    : (object)"(unresolved)").ToArray();
+
+            rows.Add(new MockRow
+            {
+                Property = label,
+                ValueA = instanceA != null ? Resolve(listA, byIdA) : null,
+                ValueB = instanceB != null ? Resolve(listB, byIdB) : null,
+            });
+        }
+
+        /// <summary>Every <c>m_Modification.m_Modifications</c> entry, keyed the same content-derived
+        /// way <see cref="UnityYamlParser"/> keys its span (<c>"{target.fileID}::{propertyPath}"</c>)
+        /// so a row's <see cref="MockRow.Key"/> (built the same way, prefixed with
+        /// <c>"m_Modification.m_Modifications::"</c>) resolves on either side independently of
+        /// position. An entry missing either half of that identity is skipped — same "best effort" as
+        /// the parser's own span tracking for this shape.</summary>
+        private static Dictionary<string, Dictionary<string, object>> GetModificationEntries(GitYamlDocument instance)
+        {
+            var result = new Dictionary<string, Dictionary<string, object>>();
+            if (instance == null ||
+                !instance.Fields.TryGetValue("m_Modification", out var modRaw) || modRaw is not Dictionary<string, object> modMap ||
+                !modMap.TryGetValue("m_Modifications", out var listRaw) || listRaw is not List<object> list) return result;
+
+            foreach (var entry in list)
+            {
+                if (entry is not Dictionary<string, object> map) continue;
+                if (!map.TryGetValue("target", out var targetRaw) || targetRaw is not Dictionary<string, object> targetMap) continue;
+                if (!targetMap.TryGetValue("fileID", out var fid) || fid is not string fileId) continue;
+                if (!map.TryGetValue("propertyPath", out var ppRaw) || ppRaw is not string propertyPath) continue;
+                result[$"{fileId}::{propertyPath}"] = map;
+            }
+            return result;
+        }
+
+        /// <summary>One of <c>m_Modification</c>'s own list-valued fields (removed/added components or
+        /// GameObjects) — canonical empty form is always present (<c>fieldKey: []</c>), so a missing
+        /// PrefabInstance/field just reads as an empty list rather than null, keeping every caller's
+        /// comparison logic simple.</summary>
+        private static List<object> GetModificationList(GitYamlDocument instance, string fieldKey) =>
+            instance != null && instance.Fields.TryGetValue("m_Modification", out var modRaw) && modRaw is Dictionary<string, object> modMap &&
+            modMap.TryGetValue(fieldKey, out var listRaw) && listRaw is List<object> list ? list : new List<object>();
+
+        /// <summary>A modification entry's actual override value — either a plain scalar
+        /// (<c>value</c>, parsed the same way any other scalar field is — see
+        /// <see cref="UnityYamlValueConverter.ToDisplayValue(object,System.Collections.Generic.Dictionary{long,GitYamlDocument},string,System.Type)"/>)
+        /// or an object reference (<c>objectReference</c>, resolved against <paramref name="byId"/> —
+        /// unlike a modification TARGET, which points into the referenced prefab asset, an
+        /// objectReference override points at another object in THIS same file/revision, same as any
+        /// other local reference field).</summary>
+        private static object ResolveModificationValue(Dictionary<string, object> entry, Dictionary<long, GitYamlDocument> byId)
+        {
+            if (entry.TryGetValue("objectReference", out var refRaw) && refRaw is Dictionary<string, object> refMap &&
+                refMap.TryGetValue("fileID", out var fid) && fid is string fidStr && fidStr != "0")
+                return UnityYamlValueConverter.ToDisplayValue(refMap, byId);
+
+            if (entry.TryGetValue("value", out var valueRaw) && valueRaw is string s && s.Length > 0)
+                return UnityYamlValueConverter.ToDisplayValue(s);
+
+            return null;
+        }
+
+        /// <summary>"m_LocalPosition.x" -> "Local Position X" — humanizes the leading serialized field
+        /// name the normal way (<see cref="UnityYamlFieldNames.Humanize"/>) and appends any remaining
+        /// dotted segments (a struct's axis, a list index) verbatim in upper case, Inspector-label
+        /// style, rather than running the whole dotted string through the same regex (which has no
+        /// concept of "." as a word boundary).</summary>
+        private static string HumanizePropertyPath(string propertyPath)
+        {
+            var segments = propertyPath.Split('.');
+            var head = UnityYamlFieldNames.Humanize(segments[0]);
+            return segments.Length > 1 ? $"{head} {string.Join(" ", segments.Skip(1).Select(s => s.ToUpperInvariant()))}" : head;
+        }
+
+        /// <summary>A modification target/removed-list-member's own guid+fileID, resolved against the
+        /// PrefabInstance's source prefab the same way <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>
+        /// resolves any other nested-prefab reference — reused here so member names read the same way
+        /// a stripped placeholder's own name would (see that method's own doc comment).</summary>
+        private static object[] ResolveListDisplay(List<object> list, string sourceGuid) => list.Select(entry =>
+        {
+            if (sourceGuid != null && entry is Dictionary<string, object> map && map.TryGetValue("fileID", out var fid) && fid is string fidStr)
+            {
+                var resolved = UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, fidStr);
+                return (object)(DescribeResolvedTarget(resolved) ?? $"fileID:{fidStr}");
+            }
+            return (object)"(unresolved)";
+        }).ToArray();
+
+        /// <summary>A PrefabInstance's own source prefab guid (<c>m_SourcePrefab.guid</c>) — every
+        /// modification <c>target</c>/removed-list entry's fileID is local to THIS same prefab asset,
+        /// so this one guid resolves all of them (see <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>).
+        /// Null when the instance itself is missing or the field can't be read — every caller already
+        /// falls back to a raw fileID display in that case.</summary>
+        private static string GetPrefabSourceGuid(GitYamlDocument instance) =>
+            instance != null && instance.Fields.TryGetValue("m_SourcePrefab", out var raw) && raw is Dictionary<string, object> map &&
+            map.TryGetValue("guid", out var g) && g is string guid ? guid : null;
+
+        private static object ResolvePrefabSourceRootObject(GitYamlDocument instance)
+        {
+            if (instance == null || !instance.Fields.TryGetValue("m_SourcePrefab", out var raw) || raw is not Dictionary<string, object> map ||
+                !map.TryGetValue("guid", out var g) || g is not string guid) return null;
+            var fileId = map.TryGetValue("fileID", out var f) ? f as string : null;
+            return UnityYamlValueConverter.ResolvePrefabSourceObjectName(guid, fileId);
+        }
+
+        /// <summary>A resolved prefab-source reference (see <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>)
+        /// as a display string — a <see cref="UnityEngine.Component"/> reads as
+        /// "<c>Name (ComponentType)</c>" (its own bare <c>.name</c> just proxies to its GameObject's,
+        /// losing exactly the type info a raw fileID/propertyPath dump would otherwise force the user
+        /// to guess at), anything else falls back to its own string form.</summary>
+        private static string DescribeResolvedTarget(object resolved) => resolved switch
+        {
+            null => null,
+            UnityEngine.Component c => $"{c.name} ({c.GetType().Name})",
+            UnityEngine.Object obj => obj.name,
+            string s => s,
+            _ => resolved.ToString(),
+        };
+
+        private static string IconForModificationTarget(object resolved) => resolved switch
+        {
+            UnityEngine.GameObject => "GameObject Icon",
+            UnityEngine.Component c => IconForComponentType(c.GetType().Name),
+            _ => "GameObject Icon",
+        };
 
         private static string IconForComponentType(string typeName) => typeName switch
         {

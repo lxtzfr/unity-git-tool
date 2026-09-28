@@ -236,6 +236,20 @@ namespace UnityGitTool
                     var childIndent = CountIndent(lines[index]);
                     if (childIndent > indent)
                     {
+                        // A PrefabInstance's m_Modification block gets its own span-tracked parse
+                        // (merged in under "m_Modification.<subkey>") rather than the plain span-less
+                        // ParseNodeAt every other nested mapping gets — see UnityYamlWriter's
+                        // write-back, which needs to splice a single override or removal-list entry
+                        // independently, not just the whole m_Modification blob at once.
+                        if (key == "m_Modification")
+                        {
+                            var (subFields, subSpans) = ParseModificationBlock(lines, ref index, childIndent);
+                            map[key] = subFields;
+                            spans[key] = new LineSpan(fieldStart, index);
+                            foreach (var (subKey, subSpan) in subSpans)
+                                spans[$"{key}.{subKey}"] = subSpan;
+                            continue;
+                        }
                         map[key] = ParseNodeAt(lines, ref index, childIndent);
                         spans[key] = new LineSpan(fieldStart, index);
                         continue;
@@ -251,6 +265,136 @@ namespace UnityGitTool
                 spans[key] = new LineSpan(fieldStart, index);
             }
             return (map, spans);
+        }
+
+        /// <summary>Same shape as <see cref="ParseMappingWithSpans"/>, used only for a PrefabInstance's
+        /// <c>m_Modification:</c> block — every immediate child field (<c>m_TransformParent</c>,
+        /// <c>m_RemovedComponents</c>, <c>m_RemovedGameObjects</c>, <c>m_AddedGameObjects</c>,
+        /// <c>m_AddedComponents</c>, <c>m_Modifications</c>) gets its own span so
+        /// <see cref="UnityYamlWriter"/> can edit one of them without touching the others, unlike a
+        /// plain nested value (see <see cref="ParseNodeAt"/>). <c>m_Modifications</c> itself gets
+        /// further special-cased (see <see cref="ParseModificationEntries"/>): each override entry
+        /// inside it is a distinct editable unit (one property override), not a single list to
+        /// splice as a whole.</summary>
+        private static (Dictionary<string, object> Fields, Dictionary<string, LineSpan> Spans) ParseModificationBlock(
+            string[] lines, ref int index, int indent)
+        {
+            var map = new Dictionary<string, object>();
+            var spans = new Dictionary<string, LineSpan>();
+            while (true)
+            {
+                SkipBlank(lines, ref index);
+                if (index >= lines.Length || CountIndent(lines[index]) != indent) break;
+                var trimmed = lines[index].TrimStart();
+                if (IsSequenceLine(trimmed) || DocumentHeader.IsMatch(lines[index])) break;
+
+                var colon = FindKeyColon(trimmed);
+                if (colon < 0) break;
+                var key = trimmed.Substring(0, colon).Trim();
+                var valuePart = trimmed.Substring(colon + 1).Trim();
+                var fieldStart = index;
+                index++;
+
+                if (valuePart.Length > 0)
+                {
+                    map[key] = ParseScalar(valuePart);
+                    spans[key] = new LineSpan(fieldStart, index);
+                    continue;
+                }
+
+                SkipBlank(lines, ref index);
+                if (index < lines.Length)
+                {
+                    var childIndent = CountIndent(lines[index]);
+                    if (childIndent == indent && IsSequenceLine(lines[index].TrimStart()))
+                    {
+                        if (key == "m_Modifications")
+                        {
+                            var (items, entrySpans) = ParseModificationEntries(lines, ref index, indent);
+                            map[key] = items;
+                            spans[key] = new LineSpan(fieldStart, index);
+                            foreach (var (entryKey, entrySpan) in entrySpans)
+                                spans[$"{key}::{entryKey}"] = entrySpan;
+                        }
+                        else
+                        {
+                            map[key] = ParseSequence(lines, ref index, indent);
+                            spans[key] = new LineSpan(fieldStart, index);
+                        }
+                        continue;
+                    }
+                    if (childIndent > indent)
+                    {
+                        map[key] = ParseNodeAt(lines, ref index, childIndent);
+                        spans[key] = new LineSpan(fieldStart, index);
+                        continue;
+                    }
+                }
+                map[key] = null;
+                spans[key] = new LineSpan(fieldStart, index);
+            }
+            return (map, spans);
+        }
+
+        /// <summary>Walks <c>m_Modifications</c>' own entries the same way <see cref="ParseSequence"/>
+        /// does (including its "multi-key list item" continuation — see that method's own comment),
+        /// but additionally records each entry's <see cref="LineSpan"/> under a key derived from its
+        /// content (<c>target.fileID</c> + <c>propertyPath</c>) rather than its position, so the same
+        /// key resolves independently on the A-side and B-side documents being diffed — an entry
+        /// added, removed, or reordered between revisions still matches by identity, the same
+        /// assumption <see cref="UnityYamlWriter"/>'s field-splice write-back already makes for a
+        /// <see cref="MockRow.Key"/> lookup. An entry missing either half of that identity (malformed,
+        /// or a shape this doesn't recognize) still parses into the list — just isn't independently
+        /// addressable for write-back, same "best effort" fallback as everywhere else in this parser.</summary>
+        private static (List<object> Items, List<(string Key, LineSpan Span)> EntrySpans) ParseModificationEntries(
+            string[] lines, ref int index, int indent)
+        {
+            var list = new List<object>();
+            var entrySpans = new List<(string, LineSpan)>();
+            while (true)
+            {
+                SkipBlank(lines, ref index);
+                if (index >= lines.Length || CountIndent(lines[index]) != indent) break;
+                var trimmed = lines[index].TrimStart();
+                if (!IsSequenceLine(trimmed)) break;
+
+                var itemStart = index;
+                var rest = trimmed.Length > 1 ? trimmed.Substring(1).TrimStart() : "";
+                index++;
+
+                var entry = new Dictionary<string, object>();
+                if (rest.Length == 0)
+                {
+                    if (ParseNode(lines, ref index) is Dictionary<string, object> parsed) entry = parsed;
+                }
+                else
+                {
+                    var colon = FindKeyColon(rest);
+                    if (colon >= 0)
+                    {
+                        var key = rest.Substring(0, colon).Trim();
+                        var value = rest.Substring(colon + 1).Trim();
+                        entry[key] = value.Length == 0 ? null : ParseScalar(value);
+
+                        SkipBlank(lines, ref index);
+                        if (index < lines.Length && CountIndent(lines[index]) > indent && !IsSequenceLine(lines[index].TrimStart()))
+                        {
+                            var itemIndent = CountIndent(lines[index]);
+                            foreach (var kv in ParseMapping(lines, ref index, itemIndent))
+                                entry[kv.Key] = kv.Value;
+                        }
+                    }
+                }
+
+                list.Add(entry);
+
+                var targetId = entry.TryGetValue("target", out var targetRaw) && targetRaw is Dictionary<string, object> targetMap &&
+                    targetMap.TryGetValue("fileID", out var fid) ? fid as string : null;
+                var propertyPath = entry.TryGetValue("propertyPath", out var pp) ? pp as string : null;
+                if (targetId != null && propertyPath != null)
+                    entrySpans.Add(($"{targetId}::{propertyPath}", new LineSpan(itemStart, index)));
+            }
+            return (list, entrySpans);
         }
 
         private static Dictionary<string, object> ParseMapping(string[] lines, ref int index, int indent)
