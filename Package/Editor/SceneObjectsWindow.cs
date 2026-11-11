@@ -319,7 +319,7 @@ namespace UnityGitTool
 
         /// <summary>The diff table's own controls (FieldFactory), written back through the
         /// SerializedProperty (undoable). Object references bind an ObjectField (FieldFactory leaves a
-        /// null one empty); arrays, structs and managed references fall back to an unlabeled PropertyField.</summary>
+        /// null one empty); enums, arrays, structs and managed references fall back to an unlabeled PropertyField.</summary>
         private static VisualElement CreateValueField(SerializedProperty property)
         {
             if (property.propertyType == SerializedPropertyType.ObjectReference)
@@ -330,7 +330,8 @@ namespace UnityGitTool
                 return objectField;
             }
 
-            var isPlainValue = property.propertyType is not (SerializedPropertyType.Generic or SerializedPropertyType.ManagedReference)
+            // Enum: boxedValue is the raw int, so FieldFactory would draw an IntegerField; PropertyField draws the dropdown.
+            var isPlainValue = property.propertyType is not (SerializedPropertyType.Generic or SerializedPropertyType.ManagedReference or SerializedPropertyType.Enum)
                                && (!property.isArray || property.propertyType == SerializedPropertyType.String);
             object value = null;
             if (isPlainValue)
