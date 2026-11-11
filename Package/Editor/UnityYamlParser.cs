@@ -70,6 +70,7 @@ namespace UnityGitTool
             if (string.IsNullOrEmpty(yaml)) return documents;
 
             var lines = yaml.Replace("\r\n", "\n").Split('\n');
+            JoinFlowContinuations(lines);
             var index = 0;
 
             while (index < lines.Length)
@@ -225,6 +226,7 @@ namespace UnityGitTool
 
                 if (valuePart.Length > 0)
                 {
+                    SkipContinuations(lines, ref index);
                     map[key] = ParseScalar(valuePart);
                     spans[key] = new LineSpan(fieldStart, index);
                     continue;
@@ -297,6 +299,7 @@ namespace UnityGitTool
 
                 if (valuePart.Length > 0)
                 {
+                    SkipContinuations(lines, ref index);
                     map[key] = ParseScalar(valuePart);
                     spans[key] = new LineSpan(fieldStart, index);
                     continue;
@@ -447,8 +450,9 @@ namespace UnityGitTool
         {
             s = s.Trim();
             if (s.Length == 0) return null;
-            if (s[0] == '{') return ParseFlowMap(s);
-            if (s[0] == '[') return ParseFlowList(s);
+            // Only when closed: a plain value can start with a bracket ("[Test] Door"), which would otherwise recurse forever.
+            if (s[0] == '{' && s[^1] == '}') return ParseFlowMap(s);
+            if (s[0] == '[' && s[^1] == ']') return ParseFlowList(s);
             if (s.Length >= 2 && (s[0] == '"' || s[0] == '\'') && s[^1] == s[0]) return s.Substring(1, s.Length - 2);
             return s;
         }
@@ -526,7 +530,55 @@ namespace UnityGitTool
 
         private static void SkipBlank(string[] lines, ref int index)
         {
-            while (index < lines.Length && string.IsNullOrWhiteSpace(lines[index])) index++;
+            while (index < lines.Length && (string.IsNullOrWhiteSpace(lines[index]) || lines[index] == ContinuationLine)) index++;
+        }
+
+        private static void SkipContinuations(string[] lines, ref int index)
+        {
+            while (index < lines.Length && lines[index] == ContinuationLine) index++;
+        }
+
+        /// <summary>Stands for a line merged into the one above it by <see cref="JoinFlowContinuations"/>:
+        /// kept (not removed) so every line index, which spans and the writer rely on, stays the file's.</summary>
+        private const string ContinuationLine = "\u0001";
+
+        /// <summary>Unity wraps a long flow value (<c>key: [{...},</c> / <c>  {...}]</c>) onto deeper-indented
+        /// lines. Each one is appended to the line that opened it, so the value parses as one scalar.</summary>
+        private static void JoinFlowContinuations(string[] lines)
+        {
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].TrimStart();
+                var valueStart = IsSequenceLine(trimmed) ? trimmed.Substring(1).TrimStart() : trimmed;
+                var colon = FindKeyColon(valueStart);
+                var value = (colon >= 0 ? valueStart.Substring(colon + 1) : valueStart).Trim();
+                if (value.Length == 0 || (value[0] != '{' && value[0] != '[')) continue;
+
+                var depth = FlowDepth(value);
+                var indent = CountIndent(lines[i]);
+                for (var j = i + 1; depth > 0 && j < lines.Length && !string.IsNullOrWhiteSpace(lines[j]) && CountIndent(lines[j]) > indent; j++)
+                {
+                    var continuation = lines[j].Trim();
+                    lines[i] += " " + continuation;
+                    lines[j] = ContinuationLine;
+                    depth += FlowDepth(continuation);
+                }
+            }
+        }
+
+        /// <summary>Opened minus closed brackets, outside quotes.</summary>
+        private static int FlowDepth(string s)
+        {
+            var depth = 0;
+            var quote = (char)0;
+            foreach (var c in s)
+            {
+                if (quote != 0) { if (c == quote) quote = (char)0; continue; }
+                if (c == '"' || c == '\'') quote = c;
+                else if (c is '{' or '[') depth++;
+                else if (c is '}' or ']') depth--;
+            }
+            return depth;
         }
 
         /// <summary>Finds the colon separating a mapping key from its value — the first colon
