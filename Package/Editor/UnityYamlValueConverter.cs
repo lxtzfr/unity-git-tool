@@ -188,7 +188,7 @@ namespace UnityGitTool
         /// <summary>Every object of the asset by its local file id. A GlobalObjectId lookup needs the
         /// right identifier type per asset kind (scene object, native asset, imported model) and logs
         /// "Failed to load" for an FBX when it's wrong; the asset's own objects work for every kind.</summary>
-        private static Dictionary<long, UnityEngine.Object> ObjectsByLocalId(string guid, string path)
+        internal static Dictionary<long, UnityEngine.Object> ObjectsByLocalId(string guid, string path)
         {
             if (ObjectsByLocalIdCache.TryGetValue(guid, out var cached)) return cached;
             var index = new Dictionary<long, UnityEngine.Object>();

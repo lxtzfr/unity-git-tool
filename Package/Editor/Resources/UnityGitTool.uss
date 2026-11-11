@@ -391,3 +391,14 @@
 .gt-split {
     flex-grow: 1;
 }
+
+.gt-tab-toggle {
+    align-self: center;
+    margin-bottom: 4px;
+}
+
+/* A field label keeps the Inspector's ~120px label column otherwise. */
+.gt-tab-toggle > .unity-base-field__label {
+    min-width: 0;
+    padding-right: 4px;
+}

@@ -178,8 +178,8 @@ namespace UnityGitTool
             _rows = new List<SceneYamlRow>();
             if (node != null)
             {
-                var asset = AssetDatabase.LoadMainAssetAtPath(node.Path);
-                if (asset != null && node.InstanceId == 0) EditorGUIUtility.PingObject(asset);
+                EditorSelectionSync.Select(node.InstanceId == 0 ? null
+                    : EditorSelectionSync.FindInstanceRoot(node.Path, node.InstanceId, node.Entries[0].SourceGuid), node.Path);
                 foreach (var group in node.Entries.GroupBy(e => e.InstanceId))
                 {
                     var entries = group.ToList();

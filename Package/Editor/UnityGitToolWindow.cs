@@ -109,6 +109,17 @@ namespace UnityGitTool
                 _tabButtons[tab] = button;
                 bar.Add(button);
             }
+            var spacer = new VisualElement();
+            spacer.AddToClassList("gt-flex-spacer");
+            bar.Add(spacer);
+            var sync = new Toggle("Select in Unity")
+            {
+                value = EditorSelectionSync.Enabled,
+                tooltip = "Selecting a file, GameObject or prefab instance in any tab selects it in the Hierarchy / Project too (scene objects: the scene must be open)",
+            };
+            sync.AddToClassList("gt-tab-toggle");
+            sync.RegisterValueChangedCallback(e => EditorSelectionSync.Enabled = e.newValue);
+            bar.Add(sync);
             return bar;
         }
 

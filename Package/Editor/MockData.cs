@@ -227,6 +227,10 @@ namespace UnityGitTool
         /// when <see cref="Badge"/> is <see cref="MockBadge.None"/> (a structural passthrough node).</summary>
         public MockHeaderState HeaderStateA;
         public MockHeaderState HeaderStateB;
+
+        /// <summary>A prefab instance node's object in its source asset (the source root for the instance
+        /// itself): what finds the instance's own object in the opened file.</summary>
+        public UnityEngine.Object SourceObject;
     }
 
     /// <summary>

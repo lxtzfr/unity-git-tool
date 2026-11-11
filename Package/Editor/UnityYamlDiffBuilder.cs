@@ -627,6 +627,8 @@ namespace UnityGitTool
                 Kind = MockNodeKind.PrefabInstance,
                 FilePath = filePath,
                 FileId = id,
+                SourceObject = string.IsNullOrEmpty(sourceGuid) ? null
+                    : UnityEditor.AssetDatabase.LoadAssetAtPath<UnityEngine.GameObject>(UnityEditor.AssetDatabase.GUIDToAssetPath(sourceGuid)),
                 Badge = badge,
                 HeaderStateA = headerStateA,
                 HeaderStateB = headerStateB,
@@ -706,6 +708,7 @@ namespace UnityGitTool
                 Kind = MockNodeKind.PrefabInstanceObject,
                 FilePath = filePath,
                 FileId = instanceId,
+                SourceObject = objectNode.Owner,
                 Badge = isPassthrough ? MockBadge.None : badge,
                 HeaderStateA = isPassthrough ? MockHeaderState.None : headerStateA,
                 HeaderStateB = isPassthrough ? MockHeaderState.None : headerStateB,

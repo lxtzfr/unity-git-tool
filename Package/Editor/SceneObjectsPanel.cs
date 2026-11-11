@@ -268,13 +268,13 @@ namespace UnityGitTool
             if (target == null) return; // only in the saved file (deleted since), or the scene isn't loaded
 
             _syncingSelection = true;
-            try { Selection.activeObject = target; }
+            try { EditorSelectionSync.Select(target); }
             finally { _syncingSelection = false; }
         }
 
         private void OnEditorSelectionChanged()
         {
-            if (_syncingSelection || !_treeBuilt) return;
+            if (_syncingSelection || !_treeBuilt || !EditorSelectionSync.Enabled) return;
             var go = Selection.activeGameObject;
             if (go == null || !go.scene.IsValid()) return; // a prefab asset
 

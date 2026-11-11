@@ -55,6 +55,8 @@ namespace UnityGitTool
 
             _selectedNode = node;
             UpdateBreadcrumb();
+            if (!string.IsNullOrEmpty(node.FilePath))
+                EditorSelectionSync.Select(FindEditorObject(node), GetProjectRelativePath(Path.Combine(GitFileReader.RepositoryRoot, node.FilePath)));
             // OwnRowsByNodeId, not RowsByNodeId — a file node's (and an ancestor GameObject's)
             // RowsByNodeId entry aggregates every descendant's rows too (see BuildFileNode /
             // BuildGameObjectSubtree), which is what ApplyResolution needs but would otherwise
@@ -428,6 +430,19 @@ namespace UnityGitTool
             if (string.IsNullOrEmpty(path)) return false;
             var asset = AssetDatabase.LoadAssetAtPath<GameObject>(path);
             return asset != null && PrefabUtility.GetPrefabAssetType(asset) == PrefabAssetType.Variant;
+        }
+
+        /// <summary>The node's object in the project as it is now: null when it only exists in another revision.</summary>
+        private static Object FindEditorObject(MockNode node)
+        {
+            if (string.IsNullOrEmpty(node.FilePath)) return null;
+            var assetPath = GetProjectRelativePath(Path.Combine(GitFileReader.RepositoryRoot, node.FilePath));
+            return node.Kind switch
+            {
+                MockNodeKind.SceneFile or MockNodeKind.PrefabFile => EditorSelectionSync.Find(assetPath, 0),
+                MockNodeKind.PrefabInstance or MockNodeKind.PrefabInstanceObject => EditorSelectionSync.FindInInstance(assetPath, node.FileId, node.SourceObject),
+                _ => EditorSelectionSync.Find(assetPath, node.FileId),
+            };
         }
     }
 }

@@ -18,6 +18,8 @@ namespace UnityGitTool
         public long InstanceId;
         /// <summary>As the Hierarchy names the instance.</summary>
         public string InstanceName;
+        /// <summary>The instance's source prefab or model; a target can sit in a nested one.</summary>
+        public string SourceGuid;
         public string TargetGuid;
         public long TargetId;
         /// <summary><see cref="DeadEntryKind.Override"/> only.</summary>
@@ -53,7 +55,12 @@ namespace UnityGitTool
                 var found = Find(instance, byId, sources).ToList();
                 if (found.Count == 0) continue;
                 var name = UnityYamlDiffBuilder.ResolvePrefabInstanceName(instance, UnityYamlDiffBuilder.GetPrefabSourceGuid(instance)) ?? $"PrefabInstance #{instance.FileId}";
-                foreach (var entry in found) entry.InstanceName = name;
+                var sourceGuid = UnityYamlDiffBuilder.GetPrefabSourceGuid(instance);
+                foreach (var entry in found)
+                {
+                    entry.InstanceName = name;
+                    entry.SourceGuid = sourceGuid;
+                }
                 dead.AddRange(found);
             }
             return dead;
