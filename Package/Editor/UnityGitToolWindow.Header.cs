@@ -50,14 +50,14 @@ namespace UnityGitTool
             // the branch you're already comparing against), but it also re-checks whether a
             // merge/rebase/cherry-pick/revert started or finished outside this tool since it opened
             // (see DetectAndApplyConflictState) — if that flips _isMerge, the whole layout (single vs
-            // dual tree, Result column or not — see CreateGUI) needs rebuilding, not just a data refresh.
+            // dual tree, Result column or not — see BuildDiffPane) needs rebuilding, not just a data refresh.
             var refresh = new Button(() =>
             {
                 if (!ConfirmPendingRollbacks("Refresh")) return;
                 if (DetectAndApplyConflictState())
                 {
-                    rootVisualElement.Clear();
-                    CreateGUI();
+                    _diffPane.Clear();
+                    BuildDiffPane();
                     return;
                 }
                 RunDiff();

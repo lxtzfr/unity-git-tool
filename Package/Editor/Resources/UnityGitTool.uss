@@ -13,6 +13,33 @@
     flex-shrink: 0;
 }
 
+.gt-tabs {
+    flex-direction: row;
+    flex-shrink: 0; /* see .gt-toolbar */
+    padding: 4px 8px 0 8px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.25);
+}
+
+.gt-tab {
+    height: 22px;
+    margin: 0 2px -1px 0;
+    padding: 0 12px;
+    border-width: 1px 1px 0 1px;
+    border-color: rgba(0, 0, 0, 0.25);
+    border-radius: 3px 3px 0 0;
+    background-color: rgba(128, 128, 128, 0.08);
+}
+
+.gt-tab:hover {
+    background-color: rgba(128, 128, 128, 0.18);
+}
+
+.gt-tab-active {
+    background-color: var(--unity-colors-window-background);
+    -unity-font-style: bold;
+}
+
 .gt-filter-group {
     flex-direction: row;
     align-items: center;

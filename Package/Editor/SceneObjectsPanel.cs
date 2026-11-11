@@ -12,8 +12,9 @@ namespace UnityGitTool
 {
     /// <summary>The open scenes' saved files, read from their YAML like the diff window reads a revision:
     /// one node per scene over its GameObject tree on the left, Property | Value of the selection on the right (read-only).
-    /// Selection is synced with the Hierarchy through each object's GlobalObjectId.</summary>
-    public class SceneObjectsWindow : EditorWindow
+    /// Selection is synced with the Hierarchy through each object's GlobalObjectId. A tab of
+    /// <see cref="UnityGitToolWindow"/>: it listens to the Editor only while shown (a reload reads every scene).</summary>
+    internal sealed class SceneObjectsPanel
     {
         private TreeView _tree;
         private MultiColumnListView _table;
@@ -30,25 +31,41 @@ namespace UnityGitTool
         // viewController / SetSelectionById throw until the first SetRootItems.
         private bool _treeBuilt;
 
-        [MenuItem("Unity Git Tool/Scene Objects", priority = 1)]
-        private static void Open()
+        private bool _shown;
+
+        public VisualElement Build()
         {
-            var window = GetWindow<SceneObjectsWindow>("Scene Objects");
-            window.minSize = new Vector2(700, 360);
+            var root = new VisualElement { style = { flexGrow = 1 } };
+            var split = new TwoPaneSplitView(0, 340, TwoPaneSplitViewOrientation.Horizontal) { style = { flexGrow = 1 } };
+            split.AddToClassList("gt-split");
+            split.Add(BuildTreePanel());
+            split.Add(BuildTablePanel());
+            root.Add(split);
+            root.Add(BuildFooter());
+            return root;
         }
 
-        private void OnEnable()
+        /// <summary>Tab shown: listen to scene / selection changes and read the saved files again
+        /// (they may have changed while hidden).</summary>
+        public void Show()
         {
+            if (_shown) return;
+            _shown = true;
             EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
             EditorSceneManager.sceneOpened += OnSceneOpened;
             EditorSceneManager.sceneClosed += OnSceneClosed;
             EditorSceneManager.sceneSaved += OnSceneSaved;
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
             Selection.selectionChanged += OnEditorSelectionChanged;
+            Reload();
+            OnEditorSelectionChanged();
         }
 
-        private void OnDisable()
+        /// <summary>Tab hidden or window closed.</summary>
+        public void Hide()
         {
+            if (!_shown) return;
+            _shown = false;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
             EditorSceneManager.sceneOpened -= OnSceneOpened;
             EditorSceneManager.sceneClosed -= OnSceneClosed;
@@ -59,23 +76,6 @@ namespace UnityGitTool
             _reloadScheduled = false;
         }
 
-        private void CreateGUI()
-        {
-            var root = rootVisualElement;
-            var stylesheet = Resources.Load<StyleSheet>("UnityGitTool");
-            if (stylesheet != null) root.styleSheets.Add(stylesheet);
-
-            var split = new TwoPaneSplitView(0, 340, TwoPaneSplitViewOrientation.Horizontal) { style = { flexGrow = 1 } };
-            split.AddToClassList("gt-split");
-            split.Add(BuildTreePanel());
-            split.Add(BuildTablePanel());
-            root.Add(split);
-            root.Add(BuildFooter());
-
-            Reload();
-            OnEditorSelectionChanged();
-        }
-
         private void OnActiveSceneChanged(Scene previous, Scene next) => _tree?.RefreshItems(); // the bold label moves
         private void OnSceneOpened(Scene scene, OpenSceneMode mode) => ScheduleReload();
         private void OnSceneClosed(Scene scene) => ScheduleReload();
@@ -83,8 +83,7 @@ namespace UnityGitTool
 
         // sceneClosed fires while the scene is still listed, and a Save All raises one event per scene:
         // reload once, on the next editor update. Not delayCall: it doesn't run while the Editor is unfocused.
-        // NonSerialized: a domain reload keeps a window's private fields but drops the pending callback.
-        [System.NonSerialized] private bool _reloadScheduled;
+        private bool _reloadScheduled;
 
         private void ScheduleReload()
         {

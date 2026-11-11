@@ -45,11 +45,26 @@ namespace UnityGitTool
         private static readonly Color BadgeOrange = new(0.95f, 0.62f, 0.15f);
         private static readonly Color BadgeRed = new(0.85f, 0.35f, 0.3f);
 
+        private enum Tab { Diff, SceneObjects }
+
+        // Serialized: the window reopens on the same tab after a domain reload or an Editor restart.
+        [SerializeField] private Tab _tab;
+        private readonly Dictionary<Tab, Button> _tabButtons = new();
+        private VisualElement _diffPane;
+        private VisualElement _scenePane;
+        private SceneObjectsPanel _scenePanel;
+
         [MenuItem("Unity Git Tool/Diff - Merge", priority = 0)]
-        private static void Open()
+        private static void Open() => OpenTab(Tab.Diff);
+
+        [MenuItem("Unity Git Tool/Scene Objects", priority = 1)]
+        private static void OpenSceneObjects() => OpenTab(Tab.SceneObjects);
+
+        private static void OpenTab(Tab tab)
         {
             var window = GetWindow<UnityGitToolWindow>("Unity Git Tool");
             window.minSize = new Vector2(900, 480);
+            window.SelectTab(tab);
         }
 
         private void CreateGUI()
@@ -58,6 +73,50 @@ namespace UnityGitTool
             var stylesheet = Resources.Load<StyleSheet>("UnityGitTool");
             if (stylesheet != null) root.styleSheets.Add(stylesheet);
 
+            root.Add(BuildTabBar());
+            _diffPane = new VisualElement { style = { flexGrow = 1 } };
+            root.Add(_diffPane);
+            BuildDiffPane();
+            _scenePanel = new SceneObjectsPanel();
+            _scenePane = _scenePanel.Build();
+            root.Add(_scenePane);
+            SelectTab(_tab);
+        }
+
+        private void OnDisable() => _scenePanel?.Hide();
+
+        private VisualElement BuildTabBar()
+        {
+            var bar = new VisualElement();
+            bar.AddToClassList("gt-tabs");
+            _tabButtons.Clear();
+            foreach (var (tab, label) in new[] { (Tab.Diff, "Diff / Merge"), (Tab.SceneObjects, "Scene Objects") })
+            {
+                var button = new Button(() => SelectTab(tab)) { text = label };
+                button.AddToClassList("gt-tab");
+                _tabButtons[tab] = button;
+                bar.Add(button);
+            }
+            return bar;
+        }
+
+        private void SelectTab(Tab tab)
+        {
+            _tab = tab;
+            if (_diffPane == null) return; // before CreateGUI: it applies _tab itself
+            foreach (var (key, button) in _tabButtons) button.EnableInClassList("gt-tab-active", key == tab);
+            _diffPane.style.display = tab == Tab.Diff ? DisplayStyle.Flex : DisplayStyle.None;
+            _scenePane.style.display = tab == Tab.SceneObjects ? DisplayStyle.Flex : DisplayStyle.None;
+            if (tab == Tab.SceneObjects) _scenePanel.Show();
+            else _scenePanel.Hide();
+            Debug.Log($"[UnityGitTool] Tab: {tab}");
+        }
+
+        /// <summary>The Diff / Merge tab: header, file tree(s), table, footer. Rebuilt whole when a
+        /// merge starts or ends (single vs dual tree).</summary>
+        private void BuildDiffPane()
+        {
+            var root = _diffPane;
             DetectAndApplyConflictState(); // sets _isMerge (and A/B when a conflict is found) before anything below reads it
 
             // Table panel built first so its columns/`_table` exist before either tree panel's
