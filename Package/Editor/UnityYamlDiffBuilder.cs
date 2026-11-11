@@ -984,6 +984,12 @@ namespace UnityGitTool
         /// under. <c>Owner</c> is null when the target doesn't resolve; <c>OwnerLabel</c> is then the raw label.</summary>
         internal static (string Label, string Icon, UnityEngine.GameObject Owner, string OwnerLabel, UnityEngine.Object Target) DescribeModificationTarget(string sourceGuid, string targetId)
         {
+            // Not the asset's main object as a stand-in: the entry would then sit under the wrong GameObject.
+            if (sourceGuid != null && !UnityYamlValueConverter.SourceObjectExists(sourceGuid, targetId))
+            {
+                var missing = $"missing #{targetId} ({System.IO.Path.GetFileName(AssetDatabase.GUIDToAssetPath(sourceGuid))})";
+                return (missing, "console.warnicon.sml", null, missing, null);
+            }
             var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
             var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
             var owner = resolved switch

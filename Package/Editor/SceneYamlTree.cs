@@ -16,6 +16,9 @@ namespace UnityGitTool
         public YamlObject GameObject;
         public string Label;
         public string Icon;
+        /// <summary>On an instance root (or the scene node, for an instance not in the tree).</summary>
+        public List<DeadPrefabEntry> DeadEntries = new();
+        public Action<List<DeadPrefabEntry>> CleanDeadEntries;
     }
 
     internal sealed class SceneYamlRow
@@ -27,6 +30,9 @@ namespace UnityGitTool
         public bool IsHeader;
         public string HeaderIcon;
         public bool Overridden;
+        public string ActionLabel;
+        public string ActionTooltip;
+        public Action Action;
     }
 
     /// <summary>The scene file's Hierarchy from its YAML, prefab instances expanded down to their
@@ -35,7 +41,8 @@ namespace UnityGitTool
     {
         /// <summary>A scene's node (as the Hierarchy shows each open scene) over its root GameObjects;
         /// <paramref name="hierarchy"/> is null for a scene with no file yet.</summary>
-        public static TreeViewItemData<SceneYamlNode> BuildScene(string label, string scenePath, YamlHierarchy hierarchy, Func<int> nextId)
+        public static TreeViewItemData<SceneYamlNode> BuildScene(string label, string scenePath, YamlHierarchy hierarchy, Func<int> nextId,
+            List<DeadPrefabEntry> deadEntries = null, Action<List<DeadPrefabEntry>> cleanDeadEntries = null)
         {
             var scene = new SceneYamlNode
             {
@@ -44,15 +51,26 @@ namespace UnityGitTool
                 ScenePath = scenePath,
                 Label = label,
                 Icon = "SceneAsset Icon",
+                CleanDeadEntries = cleanDeadEntries,
             };
+            var deadByRoot = new Dictionary<long, List<DeadPrefabEntry>>();
+            foreach (var entry in deadEntries ?? new List<DeadPrefabEntry>())
+            {
+                var rootId = hierarchy?.InstanceRoots.GetValueOrDefault(entry.InstanceId) ?? 0;
+                if (!deadByRoot.TryGetValue(rootId, out var list)) deadByRoot[rootId] = list = new List<DeadPrefabEntry>();
+                list.Add(entry);
+            }
             var icons = new Dictionary<string, string>();
             var children = hierarchy == null
                 ? new List<TreeViewItemData<SceneYamlNode>>()
-                : SceneRoots(hierarchy).Select(go => BuildNode(go, scene, icons, nextId)).ToList();
+                : SceneRoots(hierarchy).Select(go => BuildNode(go, scene, icons, nextId, deadByRoot)).ToList();
+            // An instance whose root isn't in the tree: listed on the scene itself.
+            scene.DeadEntries = deadByRoot.Where(kv => kv.Key == 0 || !hierarchy.Objects.ContainsKey(kv.Key)).SelectMany(kv => kv.Value).ToList();
             return new TreeViewItemData<SceneYamlNode>(nextId(), scene, children);
         }
 
-        private static TreeViewItemData<SceneYamlNode> BuildNode(YamlObject go, SceneYamlNode scene, Dictionary<string, string> icons, Func<int> nextId)
+        private static TreeViewItemData<SceneYamlNode> BuildNode(YamlObject go, SceneYamlNode scene, Dictionary<string, string> icons, Func<int> nextId,
+            Dictionary<long, List<DeadPrefabEntry>> deadByRoot)
         {
             var node = new SceneYamlNode
             {
@@ -62,8 +80,10 @@ namespace UnityGitTool
                 GameObject = go,
                 Label = go.Name,
                 Icon = go.InstanceGuid != null ? PrefabIcon(go.InstanceGuid, icons) : "GameObject Icon",
+                DeadEntries = deadByRoot.GetValueOrDefault(go.Id) ?? new List<DeadPrefabEntry>(),
+                CleanDeadEntries = scene.CleanDeadEntries,
             };
-            var children = scene.Hierarchy.ChildGameObjects(go).Select(child => BuildNode(child, scene, icons, nextId)).ToList();
+            var children = scene.Hierarchy.ChildGameObjects(go).Select(child => BuildNode(child, scene, icons, nextId, deadByRoot)).ToList();
             return new TreeViewItemData<SceneYamlNode>(nextId(), node, children);
         }
 
@@ -88,6 +108,7 @@ namespace UnityGitTool
             var go = node.GameObject;
             var hierarchy = node.Hierarchy;
             var rows = new List<SceneYamlRow> { new() { IsHeader = true, Property = node.Label, HeaderIcon = node.Icon } };
+            AddDeadEntryRows(rows, node);
             if (go == null)
             {
                 if (!string.IsNullOrEmpty(node.ScenePath))
@@ -115,6 +136,23 @@ namespace UnityGitTool
                     component.ModelObject != null ? component.ModelObject.GetType() : UnityYamlDiffBuilder.ResolveComponentType(component.TypeName, component.Doc));
             }
             return rows;
+        }
+
+        private static void AddDeadEntryRows(List<SceneYamlRow> rows, SceneYamlNode node)
+        {
+            if (node.DeadEntries.Count == 0) return;
+            var entries = node.DeadEntries;
+            rows.Add(new SceneYamlRow
+            {
+                IsHeader = true,
+                Property = $"Dead prefab entries ({entries.Count})",
+                HeaderIcon = "console.warnicon.sml",
+                ActionLabel = "Clean",
+                ActionTooltip = "These entries point at objects that no longer exist in their source asset: Unity ignores them " +
+                                "on load, drops the added objects on the next save and keeps the rest. Clean removes them all from the scene file.",
+                Action = node.CleanDeadEntries != null ? () => node.CleanDeadEntries(entries) : null,
+            });
+            rows.AddRange(entries.Select(e => new SceneYamlRow { Property = e.Label, Value = e.TargetLabel }));
         }
 
         private static void AddFields(List<SceneYamlRow> rows, YamlObject obj, HashSet<string> ignoredKeys, Type declaringType)

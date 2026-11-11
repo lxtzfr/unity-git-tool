@@ -18,6 +18,8 @@ namespace UnityGitTool
         private TreeView _tree;
         private MultiColumnListView _table;
         private Label _statusLabel;
+        private Button _cleanAllButton;
+        private readonly Dictionary<string, List<DeadPrefabEntry>> _deadByScene = new();
         private List<SceneYamlRow> _rows = new();
         private int _gameObjectCount;
         // (scene guid, targetObjectId, targetPrefabId) of a node's GlobalObjectId -> tree id, for
@@ -130,6 +132,7 @@ namespace UnityGitTool
             var sources = new YamlHierarchy.SourceCache(); // shared: scenes often place the same prefabs
             var nextId = 0;
             var roots = new List<TreeViewItemData<SceneYamlNode>>();
+            _deadByScene.Clear();
             for (var i = 0; i < SceneManager.sceneCount; i++)
             {
                 var scene = SceneManager.GetSceneAt(i);
@@ -140,7 +143,10 @@ namespace UnityGitTool
                 var label = string.IsNullOrEmpty(scene.name) ? "Untitled" : scene.name;
                 if (!hasFile) label += " (never saved)";
                 else if (!scene.isLoaded) label += " (not loaded)";
-                roots.Add(SceneYamlTree.BuildScene(label, scene.path, hierarchy, () => nextId++));
+                var dead = hierarchy != null ? DeadPrefabEntries.Find(hierarchy.ById, sources) : new List<DeadPrefabEntry>();
+                if (dead.Count > 0) _deadByScene[scene.path] = dead;
+                var scenePath = scene.path;
+                roots.Add(SceneYamlTree.BuildScene(label, scene.path, hierarchy, () => nextId++, dead, entries => CleanDeadEntries(scenePath, entries)));
             }
 
             var expandedObjects = new HashSet<(string, ulong, ulong)>();
@@ -151,7 +157,7 @@ namespace UnityGitTool
             _treeIdByObject.Clear();
             _gameObjectCount = 0;
             IndexNodes(roots);
-            Debug.Log($"[UnityGitTool] Scene Objects: read {roots.Count} scenes + {sources.FilesRead} prefab files, {_gameObjectCount} GameObjects in {watch.ElapsedMilliseconds} ms");
+            Debug.Log($"[UnityGitTool] Scene Objects: read {roots.Count} scenes + {sources.FilesRead} prefab files, {_gameObjectCount} GameObjects, {DeadCount} dead prefab entries in {watch.ElapsedMilliseconds} ms");
 
             var firstBuild = !_treeBuilt;
             _treeBuilt = true;
@@ -176,12 +182,38 @@ namespace UnityGitTool
             }
         }
 
+        private int DeadCount => _deadByScene.Values.Sum(l => l.Count);
+
         private void UpdateStatus()
         {
             if (_statusLabel == null) return;
             var dirty = Enumerable.Range(0, SceneManager.sceneCount).Select(SceneManager.GetSceneAt).Where(s => s.isDirty).Select(s => s.name).ToList();
+            var dead = DeadCount;
             _statusLabel.text = $"{SceneManager.sceneCount} scene(s), {_gameObjectCount} GameObjects (saved files)" +
+                (dead > 0 ? $" — {dead} dead prefab entr(ies), marked in the tree" : "") +
                 (dirty.Count > 0 ? $" — unsaved changes in {string.Join(", ", dirty)} are not shown until saved" : "");
+            if (_cleanAllButton != null)
+            {
+                _cleanAllButton.text = $"Clean dead entries ({dead})";
+                _cleanAllButton.style.display = dead > 0 ? DisplayStyle.Flex : DisplayStyle.None;
+            }
+        }
+
+        private void CleanDeadEntries(string scenePath, List<DeadPrefabEntry> entries)
+        {
+            DeadPrefabEntries.Clean(scenePath, entries, out var skipped);
+            foreach (var problem in skipped) Debug.LogWarning($"[UnityGitTool] {problem}");
+            Reload();
+        }
+
+        private void CleanAllDeadEntries()
+        {
+            foreach (var (path, entries) in _deadByScene.ToList())
+            {
+                DeadPrefabEntries.Clean(path, entries, out var skipped);
+                foreach (var problem in skipped) Debug.LogWarning($"[UnityGitTool] {problem}");
+            }
+            Reload();
         }
 
         private static VisualElement BuildTreeRow()
@@ -197,6 +229,10 @@ namespace UnityGitTool
             var label = new Label();
             label.AddToClassList("gt-tree-label");
             row.Add(label);
+
+            var warning = new Image { image = UnityGitToolWindow.GetIcon("console.warnicon.sml"), scaleMode = ScaleMode.ScaleToFit };
+            warning.AddToClassList("gt-tree-icon");
+            row.Add(warning);
             return row;
         }
 
@@ -207,6 +243,9 @@ namespace UnityGitTool
             label.text = node.Label;
             // Like the Hierarchy: the active scene's name in bold.
             label.EnableInClassList("gt-row-header-label", node.GameObject == null && node.ScenePath == SceneManager.GetActiveScene().path);
+            var warning = (Image)element[2];
+            warning.style.display = node.DeadEntries.Count > 0 ? DisplayStyle.Flex : DisplayStyle.None;
+            warning.tooltip = node.DeadEntries.Count > 0 ? $"{node.DeadEntries.Count} dead prefab entr(ies): their target no longer exists in the source asset" : null;
         }
 
         // -------------------------------------------------------------------- selection --
@@ -328,6 +367,12 @@ namespace UnityGitTool
         {
             element.Clear(); // cells are recycled across rows, the previous field type may differ
             element.EnableInClassList("gt-row-header", row.IsHeader);
+            if (row.Action != null)
+            {
+                var button = new Button(row.Action) { text = row.ActionLabel, tooltip = row.ActionTooltip };
+                button.AddToClassList("gt-pill");
+                element.Add(button);
+            }
             if (row.IsHeader) return;
             if (row.Value is SerializedProperty property)
             {
@@ -351,6 +396,13 @@ namespace UnityGitTool
             footer.Add(infoIcon);
             _statusLabel = new Label();
             footer.Add(_statusLabel);
+            _cleanAllButton = new Button(CleanAllDeadEntries)
+            {
+                tooltip = "Remove from the open scenes' files every prefab instance entry whose target no longer exists in its source asset",
+                style = { display = DisplayStyle.None, marginLeft = StyleKeyword.Auto },
+            };
+            _cleanAllButton.AddToClassList("gt-pill");
+            footer.Add(_cleanAllButton);
             return footer;
         }
     }

@@ -59,7 +59,7 @@ namespace UnityGitTool
             var skipped = new List<string>();
 
             var (toDelete, componentOwners, childParents) = CollectDeletionCascade(deletedGameObjectIds, deletedComponentIds, baseById);
-            DeleteOrphanedStrippedOwners(toDelete, componentOwners, baseById, baseLines);
+            DeleteOrphanedStrippedOwners(toDelete, componentOwners, childParents, baseById, baseLines);
 
             var edits = new List<LineEdit>();
             edits.AddRange(BuildDeletionEdits(toDelete, baseById, skipped));
@@ -80,14 +80,107 @@ namespace UnityGitTool
             // keep their original relative order), and deletion edits are added to `edits` before
             // field edits above, so that ordering falls out for free — don't reorder those AddRange
             // calls without re-checking this.
+            return (ApplyEdits(baseLines, edits), skipped);
+        }
+
+        private static string ApplyEdits(List<string> lines, List<LineEdit> edits)
+        {
             foreach (var edit in edits.OrderByDescending(e => e.Start))
             {
-                baseLines.RemoveRange(edit.Start, edit.RemoveCount);
-                if (edit.Insert.Count > 0) baseLines.InsertRange(edit.Start, edit.Insert);
+                lines.RemoveRange(edit.Start, edit.RemoveCount);
+                if (edit.Insert.Count > 0) lines.InsertRange(edit.Start, edit.Insert);
             }
-
-            return (string.Join("\n", baseLines), skipped);
+            return string.Join("\n", lines);
         }
+
+        /// <summary>Drops prefab instance entries whose target no longer exists in the source
+        /// (<see cref="DeadPrefabEntries"/>): an added object goes with its document, an override or a
+        /// removed-object entry is just cut from its list.</summary>
+        public static (string Text, List<string> Skipped) RemovePrefabEntries(string baseText, List<GitYamlDocument> baseDocs, IReadOnlyCollection<DeadPrefabEntry> entries)
+        {
+            var baseById = UnityYamlDiffBuilder.IndexByFileId(baseDocs);
+            var baseLines = baseText.Replace("\r\n", "\n").Split('\n').ToList();
+            var skipped = new List<string>();
+
+            var addedComponents = entries.Where(e => e.Kind == DeadEntryKind.AddedComponent).Select(e => e.AddedObjectId).ToList();
+            // An added GameObject's entry names its Transform; the cascade deletes from the GameObject.
+            var addedGameObjects = entries.Where(e => e.Kind == DeadEntryKind.AddedGameObject)
+                .Select(e => baseById.TryGetValue(e.AddedObjectId, out var t) && TryGetReferenceFileId(t, "m_GameObject", out var go) ? go : 0)
+                .Where(id => id != 0).ToList();
+            var (toDelete, componentOwners, childParents) = CollectDeletionCascade(addedGameObjects, addedComponents, baseById);
+            DeleteOrphanedStrippedOwners(toDelete, componentOwners, childParents, baseById, baseLines);
+
+            var edits = new List<LineEdit>();
+            edits.AddRange(BuildDeletionEdits(toDelete, baseById, skipped));
+            edits.AddRange(BuildReferenceCleanupEdits(toDelete, componentOwners, childParents, baseById, baseLines, skipped));
+            edits.AddRange(BuildDanglingReferenceCleanupEdits(toDelete, baseById, baseLines));
+            foreach (var group in entries.GroupBy(e => e.InstanceId))
+            {
+                if (!baseById.TryGetValue(group.Key, out var instance))
+                {
+                    skipped.Add($"PrefabInstance #{group.Key}: not found");
+                    continue;
+                }
+                edits.AddRange(BuildOverrideRemovalEdits(instance, group.Where(e => e.Kind == DeadEntryKind.Override).ToList(), baseLines, skipped));
+                edits.AddRange(BuildRemovedListEdits(instance, "m_RemovedComponents", group.Where(e => e.Kind == DeadEntryKind.RemovedComponent).ToList(), baseLines, skipped));
+                edits.AddRange(BuildRemovedListEdits(instance, "m_RemovedGameObjects", group.Where(e => e.Kind == DeadEntryKind.RemovedGameObject).ToList(), baseLines, skipped));
+            }
+            UnityEngine.Debug.Log($"[UnityGitTool] Removing {entries.Count} dead prefab entr(ies): {toDelete.Count} document(s) deleted, {skipped.Count} skipped");
+            return (ApplyEdits(baseLines, edits), skipped);
+        }
+
+        private const string ModificationsKey = "m_Modification.m_Modifications";
+
+        private static IEnumerable<LineEdit> BuildOverrideRemovalEdits(GitYamlDocument instance, List<DeadPrefabEntry> entries, List<string> lines, List<string> skipped)
+        {
+            if (entries.Count == 0) yield break;
+            var found = new List<LineSpan>();
+            foreach (var e in entries)
+                if (instance.FieldSpans.TryGetValue($"{ModificationsKey}::{e.TargetId}::{e.PropertyPath}", out var span))
+                {
+                    if (!found.Any(f => f.Start == span.Start)) found.Add(span);
+                }
+                else skipped.Add($"override {e.PropertyPath} on #{e.TargetId}: entry not found in PrefabInstance #{instance.FileId}");
+            if (found.Count == 0) yield break;
+
+            if (found.Count == UnityYamlDiffBuilder.GetModificationList(instance, "m_Modifications").Count &&
+                instance.FieldSpans.TryGetValue(ModificationsKey, out var listSpan))
+            {
+                yield return new LineEdit(listSpan.Start, listSpan.End - listSpan.Start, new List<string> { $"{IndentOf(lines[listSpan.Start])}m_Modifications: []" });
+                yield break;
+            }
+            foreach (var span in found) yield return new LineEdit(span.Start, span.End - span.Start, new List<string>());
+        }
+
+        /// <summary>m_RemovedComponents / m_RemovedGameObjects: one <c>- {fileID: X, guid: G, type: 3}</c> line per entry.</summary>
+        private static IEnumerable<LineEdit> BuildRemovedListEdits(GitYamlDocument instance, string listKey, List<DeadPrefabEntry> entries, List<string> lines, List<string> skipped)
+        {
+            if (entries.Count == 0) yield break;
+            if (!instance.FieldSpans.TryGetValue($"m_Modification.{listKey}", out var span))
+            {
+                skipped.Add($"PrefabInstance #{instance.FileId}: its {listKey} list wasn't found");
+                yield break;
+            }
+            var needles = entries.Select(e => $"fileID: {e.TargetId}, guid: {e.TargetGuid}").ToList();
+            var hits = new List<int>();
+            var items = 0;
+            for (var i = span.Start; i < span.End; i++)
+            {
+                if (!lines[i].TrimStart().StartsWith("- ")) continue;
+                items++;
+                if (needles.Any(n => lines[i].Contains(n))) hits.Add(i);
+            }
+            if (hits.Count < entries.Count) skipped.Add($"{entries.Count - hits.Count} {listKey} entr(ies) not found in PrefabInstance #{instance.FileId}");
+            if (hits.Count == 0) yield break;
+            if (hits.Count == items)
+            {
+                yield return new LineEdit(span.Start, span.End - span.Start, new List<string> { $"{IndentOf(lines[span.Start])}{listKey}: []" });
+                yield break;
+            }
+            foreach (var i in hits) yield return new LineEdit(i, 1, new List<string>());
+        }
+
+        private static string IndentOf(string line) => line.Substring(0, line.Length - line.TrimStart().Length);
 
         /// <summary>Starting from the explicitly deleted GameObjects/components, walks out to
         /// everything that has to disappear with them: a deleted GameObject's own components (its
@@ -206,7 +299,14 @@ namespace UnityGitTool
             }
 
             foreach (var (transformId, parentId) in childParents)
-                if (UnityYamlDiffBuilder.FindTransformId(parentId, baseById) is { } parentTransformId)
+                // Added on a prefab instance: listed in that instance's m_AddedGameObjects, not in the
+                // stripped parent transform (which has no m_Children).
+                if (StrippedFather(transformId, baseById) is { } strippedFather)
+                {
+                    if (TryGetReferenceFileId(strippedFather, "m_PrefabInstance", out var instanceId) && !toDelete.Contains(instanceId))
+                        AddTarget(instanceId, AddedGameObjectsKey, transformId);
+                }
+                else if (UnityYamlDiffBuilder.FindTransformId(parentId, baseById) is { } parentTransformId)
                     AddTarget(parentTransformId, "m_Children", transformId);
                 else
                     skipped.Add($"GameObject: deleted, but its parent #{parentId}'s own Transform wasn't found — file may need a manual cleanup pass");
@@ -219,8 +319,8 @@ namespace UnityGitTool
                         AddTarget(sceneRoots.FileId, "m_Roots", id);
 
             foreach (var ((ownerDocId, fieldKey), targetIds) in targetsByField)
-                foreach (var edit in fieldKey == AddedComponentsKey
-                    ? BuildAddedComponentEntryRemovalEdits(baseById, ownerDocId, targetIds, baseLines, skipped)
+                foreach (var edit in fieldKey is AddedComponentsKey or AddedGameObjectsKey
+                    ? BuildAddedEntryRemovalEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped)
                     : BuildReferenceRemovalEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
                     yield return edit;
         }
@@ -228,10 +328,12 @@ namespace UnityGitTool
         /// <summary>A component added on a prefab instance hangs off a stripped placeholder of its
         /// target; once the last document referencing that placeholder is deleted, it goes too.</summary>
         private static void DeleteOrphanedStrippedOwners(HashSet<long> toDelete, Dictionary<long, long> componentOwners,
-            Dictionary<long, GitYamlDocument> baseById, List<string> baseLines)
+            Dictionary<long, long> childParents, Dictionary<long, GitYamlDocument> baseById, List<string> baseLines)
         {
-            var candidates = componentOwners.Values.Distinct()
-                .Where(id => !toDelete.Contains(id) && baseById.TryGetValue(id, out var d) && d.Stripped).ToList();
+            var candidates = componentOwners.Values
+                .Concat(childParents.Keys.Select(t => StrippedFather(t, baseById)?.FileId ?? 0))
+                .Distinct()
+                .Where(id => id != 0 && !toDelete.Contains(id) && baseById.TryGetValue(id, out var d) && d.Stripped).ToList();
             if (candidates.Count == 0) return;
 
             var referenced = new HashSet<long>();
@@ -245,12 +347,17 @@ namespace UnityGitTool
                 toDelete.Add(id);
         }
 
+        private static GitYamlDocument StrippedFather(long transformId, Dictionary<long, GitYamlDocument> baseById) =>
+            baseById.TryGetValue(transformId, out var t) && TryGetReferenceFileId(t, "m_Father", out var fatherId) &&
+            baseById.TryGetValue(fatherId, out var father) && father.Stripped ? father : null;
+
         private const string AddedComponentsKey = "m_Modification.m_AddedComponents";
+        private const string AddedGameObjectsKey = "m_Modification.m_AddedGameObjects";
         private static readonly System.Text.RegularExpressions.Regex AddedObjectPattern = new(@"addedObject: \{fileID: (-?\d+)\}");
 
-        /// <summary>Each <c>m_AddedComponents</c> entry's line range (several lines: target, insertIndex,
-        /// addedObject), by its added component's id.</summary>
-        private static Dictionary<long, (int Start, int End)> AddedComponentEntries(List<string> lines, LineSpan span)
+        /// <summary>Each <c>m_AddedComponents</c> / <c>m_AddedGameObjects</c> entry's line range (several lines: target, insertIndex,
+        /// addedObject), by its added object's id.</summary>
+        private static Dictionary<long, (int Start, int End)> AddedEntries(List<string> lines, LineSpan span)
         {
             var entries = new Dictionary<long, (int Start, int End)>();
             var start = -1;
@@ -275,25 +382,24 @@ namespace UnityGitTool
             return entries;
         }
 
-        private static IEnumerable<LineEdit> BuildAddedComponentEntryRemovalEdits(
-            Dictionary<long, GitYamlDocument> baseById, long instanceId, List<long> componentIds, List<string> baseLines, List<string> skipped)
+        private static IEnumerable<LineEdit> BuildAddedEntryRemovalEdits(
+            Dictionary<long, GitYamlDocument> baseById, long instanceId, string listKey, List<long> addedIds, List<string> baseLines, List<string> skipped)
         {
-            if (!baseById.TryGetValue(instanceId, out var instance) || !instance.FieldSpans.TryGetValue(AddedComponentsKey, out var span))
+            var listName = listKey.Substring(listKey.LastIndexOf('.') + 1);
+            if (!baseById.TryGetValue(instanceId, out var instance) || !instance.FieldSpans.TryGetValue(listKey, out var span))
             {
-                skipped.Add($"PrefabInstance #{instanceId}: its m_AddedComponents list wasn't found — file may need a manual cleanup pass");
+                skipped.Add($"PrefabInstance #{instanceId}: its {listName} list wasn't found — file may need a manual cleanup pass");
                 yield break;
             }
-            var entries = AddedComponentEntries(baseLines, span);
-            var removed = componentIds.Where(entries.ContainsKey).ToList();
-            foreach (var id in componentIds.Except(removed))
-                skipped.Add($"#{id}: not listed in PrefabInstance #{instanceId}'s m_AddedComponents — file may need a manual cleanup pass");
+            var entries = AddedEntries(baseLines, span);
+            var removed = addedIds.Where(entries.ContainsKey).ToList();
+            foreach (var id in addedIds.Except(removed))
+                skipped.Add($"#{id}: not listed in PrefabInstance #{instanceId}'s {listName} — file may need a manual cleanup pass");
             if (removed.Count == 0) yield break;
 
             if (removed.Count == entries.Count)
             {
-                var keyLine = baseLines[span.Start];
-                var indent = keyLine.Substring(0, keyLine.Length - keyLine.TrimStart().Length);
-                yield return new LineEdit(span.Start, span.End - span.Start, new List<string> { $"{indent}m_AddedComponents: []" });
+                yield return new LineEdit(span.Start, span.End - span.Start, new List<string> { $"{IndentOf(baseLines[span.Start])}{listName}: []" });
                 yield break;
             }
             foreach (var id in removed)
@@ -310,8 +416,8 @@ namespace UnityGitTool
                 skipped.Add($"PrefabInstance #{instanceId}: its m_AddedComponents list wasn't found — restored component(s) not listed on it");
                 yield break;
             }
-            var existing = AddedComponentEntries(baseLines, span);
-            var otherEntries = AddedComponentEntries(otherLines, otherSpan);
+            var existing = AddedEntries(baseLines, span);
+            var otherEntries = AddedEntries(otherLines, otherSpan);
             var newLines = new List<string>();
             foreach (var id in componentIds.Where(id => !existing.ContainsKey(id)))
             {

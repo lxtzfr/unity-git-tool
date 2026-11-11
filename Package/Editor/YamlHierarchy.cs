@@ -56,6 +56,9 @@ namespace UnityGitTool
         public long RootGameObject;
         /// <summary>PrefabInstance fileID -> its root GameObject in this file's ids.</summary>
         public Dictionary<long, long> InstanceRoots = new();
+        /// <summary>An instance somewhere inside has a missing source asset: its objects are absent, so an
+        /// absent id proves nothing.</summary>
+        public bool Incomplete;
         private Dictionary<long, long> _strippedIds = new();
         private Dictionary<long, List<long>> _childrenByFather;
         private Dictionary<long, List<long>> _componentsByGameObject;
@@ -147,7 +150,8 @@ namespace UnityGitTool
         {
             var guid = UnityYamlDiffBuilder.GetPrefabSourceGuid(instance);
             var source = cache.Get(guid);
-            if (source == null) return; // missing asset: the instance has nothing to show
+            if (source == null) { Incomplete = true; return; } // missing asset: the instance has nothing to show
+            Incomplete |= source.Incomplete;
 
             var p = instance.FileId;
             long Map(long id) => id == 0 ? 0 : Combine(id, p);

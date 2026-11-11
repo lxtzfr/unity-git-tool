@@ -173,6 +173,13 @@ namespace UnityGitTool
             return typeNameFallback != null ? $"{Path.GetFileNameWithoutExtension(path)} ({typeNameFallback})" : Path.GetFileNameWithoutExtension(path);
         }
 
+        /// <summary>False when the asset exists but no longer holds that object (a model re-exported with new ids).</summary>
+        internal static bool SourceObjectExists(string guid, string fileId)
+        {
+            var path = AssetDatabase.GUIDToAssetPath(guid);
+            return string.IsNullOrEmpty(path) || !long.TryParse(fileId, out var localId) || ObjectsByLocalId(guid, path).ContainsKey(localId);
+        }
+
         private static readonly Dictionary<string, Dictionary<long, UnityEngine.Object>> ObjectsByLocalIdCache = new();
 
         /// <summary>Called once per tree build: an asset edited since must not answer from the old index.</summary>
