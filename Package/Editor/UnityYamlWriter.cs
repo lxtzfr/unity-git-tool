@@ -253,6 +253,7 @@ namespace UnityGitTool
         /// matter how deep it sits — a scalar field, or an entry inside a list of references — without
         /// needing to walk the parsed structure).</summary>
         private static readonly System.Text.RegularExpressions.Regex FileIdValuePattern = new(@"fileID:\s*(-?\d+)");
+        private static readonly System.Text.RegularExpressions.Regex ComponentEntryPattern = new(@"^\s*- component: \{fileID: (-?\d+)\}");
 
         /// <summary><see cref="BuildReferenceCleanupEdits"/> only ever cleans up the two relationships
         /// <see cref="CollectDeletionCascade"/> explicitly tracks — a component's owning GameObject's
@@ -317,6 +318,11 @@ namespace UnityGitTool
         {
             var missing = toRestore.Where(id => !baseById.ContainsKey(id)).ToList();
             if (missing.Count == 0) yield break;
+            // A GameObject without its Transform is unloadable: restoring one (even for a single
+            // component) always brings the Transform back too.
+            foreach (var goId in missing.Where(id => otherById.TryGetValue(id, out var d) && d.TypeName == "GameObject").ToList())
+                if (UnityYamlDiffBuilder.FindTransformId(goId, otherById) is { } transformId && !baseById.ContainsKey(transformId) && !missing.Contains(transformId))
+                    missing.Add(transformId);
 
             // A restored document's own raw lines can reference nested-prefab bookkeeping (a stripped
             // placeholder, or the PrefabInstance anchoring one) that isn't itself in `missing` — e.g.
@@ -376,9 +382,16 @@ namespace UnityGitTool
                 AddFixup(ownerId, "m_Component", id);
             }
 
+            var restoredIds = new HashSet<long>(blockById.Keys);
+            var sceneRoots = baseById.Values.FirstOrDefault(d => d.TypeName == "SceneRoots");
             foreach (var id in missing)
             {
                 if (!otherById.TryGetValue(id, out var doc) || doc.TypeName != "GameObject") continue;
+
+                // Components left out of the restore would be dangling m_Component entries.
+                if (blockById.TryGetValue(id, out var goBlock))
+                    goBlock.RemoveAll(line => ComponentEntryPattern.Match(line) is { Success: true } m &&
+                        long.TryParse(m.Groups[1].Value, out var compId) && !baseById.ContainsKey(compId) && !restoredIds.Contains(compId));
 
                 var parentId = UnityYamlDiffBuilder.GetParentGameObjectId(id, otherById, otherById);
                 if (parentId == 0) continue; // scene root — nothing to link into
@@ -386,6 +399,18 @@ namespace UnityGitTool
 
                 if (!baseById.ContainsKey(parentId))
                 {
+                    // Parent deleted and not restored: a scene takes the object at its root rather than
+                    // a dangling m_Father; a prefab has a single root, so there it stays reported.
+                    if (sceneRoots != null && UnityYamlDiffBuilder.FindTransformId(id, otherById) is { } orphanTransformId &&
+                        blockById.TryGetValue(orphanTransformId, out var transformBlock))
+                    {
+                        for (var i = 0; i < transformBlock.Count; i++)
+                            if (transformBlock[i].TrimStart().StartsWith("m_Father:"))
+                                transformBlock[i] = transformBlock[i].Substring(0, transformBlock[i].IndexOf("m_Father:")) + "m_Father: {fileID: 0}";
+                        AddFixup(sceneRoots.FileId, "m_Roots", orphanTransformId);
+                        UnityEngine.Debug.Log($"[UnityGitTool] Restore: GameObject #{id}'s parent #{parentId} is gone, restored at the scene root");
+                        continue;
+                    }
                     skipped.Add($"GameObject #{id}: its parent #{parentId} doesn't exist in the working tree either — restore that GameObject too");
                     continue;
                 }
@@ -578,8 +603,12 @@ namespace UnityGitTool
                 foreach (var refId in FindLocalReferences(otherLines, doc))
                 {
                     if (refId == 0 || included.Contains(refId) || baseById.ContainsKey(refId)) continue;
+                    // Own components left out (dropped from m_Component) and a gone parent (re-rooted or
+                    // reported) are handled by BuildRestoreEdits itself.
+                    if (otherById.TryGetValue(refId, out var refDoc) && TryGetReferenceFileId(refDoc, "m_GameObject", out var refOwner) && refOwner == doc.FileId) continue;
+                    if (TryGetReferenceFileId(doc, "m_Father", out var fatherId) && fatherId == refId) continue;
 
-                    if (!otherById.TryGetValue(refId, out var refDoc) || !IsPrefabBoundDependency(refDoc, otherById))
+                    if (refDoc == null || !IsPrefabBoundDependency(refDoc, otherById))
                     {
                         skipped.Add($"{doc.TypeName} #{doc.FileId}: references object #{refId}, which doesn't exist in the working tree either — restore that too");
                         continue;

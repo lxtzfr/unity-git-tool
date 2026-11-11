@@ -263,6 +263,28 @@ namespace UnityGitTool
             return map.TryGetValue("fileID", out var raw) && raw is string s && long.TryParse(s, out fileId);
         }
 
+        /// <summary>Reparented between the two sides: each side's parent read from its own file only
+        /// (the tree itself prefers B's).</summary>
+        private static bool HasParentChanged(long id, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB) =>
+            GetParentGameObjectId(id, byIdA, byIdA) != GetParentGameObjectId(id, byIdB, byIdB);
+
+        /// <summary>"Root/Child/Parent" as one side's Hierarchy shows it, or "(scene root)".</summary>
+        private static string ParentPathLabel(long id, Dictionary<long, GitYamlDocument> byId)
+        {
+            var names = new List<string>();
+            var seen = new HashSet<long>();
+            for (var current = GetParentGameObjectId(id, byId, byId); current != 0 && seen.Add(current); current = GetParentGameObjectId(current, byId, byId))
+            {
+                if (!byId.TryGetValue(current, out var doc)) { names.Add($"#{current} (missing)"); break; }
+                names.Add(doc.TypeName == "PrefabInstance"
+                    ? ResolvePrefabInstanceName(doc, GetPrefabSourceGuid(doc))
+                    : doc.Fields.GetValueOrDefault("m_Name") as string ?? $"#{current}");
+            }
+            if (names.Count == 0) return "(scene root)";
+            names.Reverse();
+            return string.Join("/", names);
+        }
+
         internal static long? FindTransformId(long gameObjectId, Dictionary<long, GitYamlDocument> byId)
         {
             if (!byId.TryGetValue(gameObjectId, out var gameObject)) return null;
@@ -284,6 +306,7 @@ namespace UnityGitTool
             byIdB.TryGetValue(id, out var goB);
             if (goA == null || goB == null) return true;
             if (DiffFields(0, goA.Fields, goB.Fields, GameObjectIgnoredKeys, byIdA, byIdB, false).Count > 0) return true;
+            if (HasParentChanged(id, byIdA, byIdB)) return true;
 
             foreach (var compId in CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct())
             {
@@ -442,6 +465,16 @@ namespace UnityGitTool
             // safe to reuse since a real document never has it) has nothing to splice into; it's
             // filtered out at apply time instead of guessed at.
             var ownRows = DiffFields(goA?.FileId ?? 0, goA?.Fields, goB?.Fields, GameObjectIgnoredKeys, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, typeof(GameObject));
+            if (goA != null && goB != null && HasParentChanged(id, byIdA, byIdB))
+                // Informational (no Key): moving it back means relinking two m_Children lists and
+                // SceneRoots, not splicing one field.
+                ownRows.Insert(0, new MockRow
+                {
+                    Property = "Parent",
+                    ValueA = ParentPathLabel(id, byIdA),
+                    ValueB = ParentPathLabel(id, byIdB),
+                    BIsOlderBaseline = bIsOlderBaseline,
+                });
 
             var componentIds = CollectComponentIds(goA).Concat(CollectComponentIds(goB)).Distinct();
             var anyComponentChanged = false;
