@@ -45,7 +45,7 @@ namespace UnityGitTool
         private static readonly Color BadgeOrange = new(0.95f, 0.62f, 0.15f);
         private static readonly Color BadgeRed = new(0.85f, 0.35f, 0.3f);
 
-        [MenuItem("Window/Unity Git Tool")]
+        [MenuItem("Unity Git Tool/Diff - Merge", priority = 0)]
         private static void Open()
         {
             var window = GetWindow<UnityGitToolWindow>("Unity Git Tool");
@@ -128,7 +128,7 @@ namespace UnityGitTool
 
         // ------------------------------------------------------------------------- shared --
 
-        private static VisualElement BuildPanelTitle(string title)
+        internal static VisualElement BuildPanelTitle(string title)
         {
             var container = new VisualElement();
             container.AddToClassList("gt-panel-title");
@@ -156,7 +156,7 @@ namespace UnityGitTool
             _table.Rebuild();
         }
 
-        private static Texture2D GetIcon(string name)
+        internal static Texture2D GetIcon(string name)
         {
             if (string.IsNullOrEmpty(name)) return null;
             var themed = EditorGUIUtility.isProSkin ? "d_" + name : name;
