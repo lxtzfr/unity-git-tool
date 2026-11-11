@@ -83,13 +83,24 @@ namespace UnityGitTool
             UpdatePendingRollbacks();
         }
 
-        /// <summary>A header present in the working tree marks / unmarks every rollbackable field under
-        /// it (all marked -> unmark all); one missing from it marks the whole document for restore.</summary>
+        /// <summary>The whole document goes back to A: restored when the working tree lacks it, deleted
+        /// when only the working tree has it.</summary>
+        private static bool IsWholeDocumentState(MockHeaderState state) => state is MockHeaderState.Deleted or MockHeaderState.Added;
+
+        private static bool IsWholeGameObjectRollback(MockRow header) =>
+            header.GameObjectNode != null && IsWholeDocumentState(header.GameObjectNode.HeaderStateB);
+
+        private static bool IsWholeComponentRollback(MockRow header) =>
+            header.HeaderStateB == MockHeaderState.Deleted ? header.FileId != 0
+            : header.HeaderStateB == MockHeaderState.Added && header.GameObjectNode == null && header.DocumentIdB != 0;
+
+        /// <summary>A header present on both sides marks / unmarks every rollbackable field under it
+        /// (all marked -> unmark all); one on a single side marks the whole document (restore or delete).</summary>
         private void ToggleHeaderRollback(MockRow header)
         {
-            if (header.GameObjectNode != null && header.GameObjectNode.HeaderStateB == MockHeaderState.Deleted)
+            if (IsWholeGameObjectRollback(header))
                 header.GameObjectNode.MarkedForRollback = !header.GameObjectNode.MarkedForRollback;
-            else if (header.FileId != 0 && header.HeaderStateB == MockHeaderState.Deleted)
+            else if (IsWholeComponentRollback(header))
                 header.MarkedForRollback = !header.MarkedForRollback;
             else
             {
@@ -103,10 +114,8 @@ namespace UnityGitTool
 
         private bool IsHeaderMarkedForRollback(MockRow header)
         {
-            if (header.GameObjectNode != null && header.GameObjectNode.HeaderStateB == MockHeaderState.Deleted)
-                return header.GameObjectNode.MarkedForRollback;
-            if (header.FileId != 0 && header.HeaderStateB == MockHeaderState.Deleted)
-                return header.MarkedForRollback;
+            if (IsWholeGameObjectRollback(header)) return header.GameObjectNode.MarkedForRollback;
+            if (IsWholeComponentRollback(header)) return header.MarkedForRollback;
             var fields = RollbackFieldsUnder(header);
             return fields.Count > 0 && fields.All(r => r.MarkedForRollback);
         }
@@ -140,14 +149,26 @@ namespace UnityGitTool
                     .ToList();
 
                 var restoreIds = new HashSet<long>();
+                var deleteComponentIds = new HashSet<long>();
+                var deleteGameObjectIds = new HashSet<long>();
                 foreach (var header in rows.Where(r => r.IsHeader && r.MarkedForRollback))
                 {
+                    if (header.HeaderStateB == MockHeaderState.Added)
+                    {
+                        deleteComponentIds.Add(header.DocumentIdB);
+                        continue;
+                    }
                     restoreIds.Add(header.FileId);
                     var owner = header.OwnerHeaderRow?.GameObjectNode;
                     if (owner != null && owner.HeaderStateB == MockHeaderState.Deleted) restoreIds.Add(owner.FileId);
                 }
                 foreach (var go in MockDataSource.GameObjectNodesByNodeId.GetValueOrDefault(fileNode.Id)?.Where(n => n.MarkedForRollback) ?? Enumerable.Empty<MockNode>())
                 {
+                    if (go.HeaderStateB == MockHeaderState.Added)
+                    {
+                        deleteGameObjectIds.Add(go.FileId);
+                        continue;
+                    }
                     restoreIds.Add(go.FileId);
                     foreach (var component in MockDataSource.OwnRowsByNodeId.GetValueOrDefault(go.Id)?.Where(r => r.IsHeader && r.FileId != 0) ?? Enumerable.Empty<MockRow>())
                         restoreIds.Add(component.FileId);
@@ -155,13 +176,13 @@ namespace UnityGitTool
 
                 var baseText = File.ReadAllText(fullPath);
                 var (patched, skipped) = UnityYamlWriter.Apply(baseText, UnityYamlParser.Parse(baseText), otherText, UnityYamlParser.Parse(otherText),
-                    fieldRows, System.Array.Empty<long>(), System.Array.Empty<long>(), restoreIds);
+                    fieldRows, deleteGameObjectIds, deleteComponentIds, restoreIds);
 
                 File.WriteAllText(fullPath, patched);
                 AssetDatabase.ImportAsset(GetProjectRelativePath(fullPath));
                 written.Add(path);
                 problems.AddRange(skipped.Select(s => $"{path}: {s}"));
-                Debug.Log($"[UnityGitTool] Rollback {path} to {_revisionA}: {fieldRows.Count} field(s), {restoreIds.Count} restored document(s), {skipped.Count} skipped");
+                Debug.Log($"[UnityGitTool] Rollback {path} to {_revisionA}: {fieldRows.Count} field(s), {restoreIds.Count} restored document(s), {deleteGameObjectIds.Count + deleteComponentIds.Count} added object(s) deleted, {skipped.Count} skipped");
             }
 
             if (written.Count > 0) RefreshFiles(written);

@@ -83,6 +83,9 @@ namespace UnityGitTool
         /// own id, so a "Delete Component" action on this row knows what to remove.</summary>
         public bool IsHeader;
         public string HeaderIcon;
+        /// <summary>A component header's own id on the B side: <see cref="FileId"/> stays 0 for a
+        /// component only on B (nothing on A to patch), yet rolling it back deletes it there.</summary>
+        public long DocumentIdB;
 
         /// <summary>This header's per-side diff status (see <see cref="MockHeaderState"/>), shown in
         /// the A/B columns instead of a field value — set alongside the rest of a component header row

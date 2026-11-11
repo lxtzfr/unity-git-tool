@@ -426,16 +426,19 @@ namespace UnityGitTool
             }
 
             // Outside Merge mode: the bulk rollback mark on B (see ToggleHeaderRollback) — every field
-            // under a Modified header, or the whole document for one missing from the working tree.
-            if (side != ColumnSide.B || !CanRollback || state == MockHeaderState.Added) return;
-            if (state != MockHeaderState.Deleted && RollbackFieldsUnder(data).Count == 0) return;
+            // under a Modified header, or the whole document for one on a single side.
+            if (side != ColumnSide.B || !CanRollback) return;
+            var whole = IsWholeGameObjectRollback(data) || IsWholeComponentRollback(data);
+            if (!whole && RollbackFieldsUnder(data).Count == 0) return;
 
             var marked = IsHeaderMarkedForRollback(data);
             BindRollbackToggle(actionButton, marked,
                 marked ? $"Unmark this {what}"
                     : state == MockHeaderState.Deleted
                         ? $"Mark this {what} to be restored from {_revisionA} (it doesn't exist in the working tree)"
-                        : $"Mark every field in this {what} for rollback to {_revisionA}'s value",
+                        : state == MockHeaderState.Added
+                            ? $"Mark this {what} to be deleted (it doesn't exist in {_revisionA})"
+                            : $"Mark every field in this {what} for rollback to {_revisionA}'s value",
                 () => ToggleHeaderRollback(data));
         }
 

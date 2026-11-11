@@ -560,7 +560,7 @@ namespace UnityGitTool
             // write-back always patches A's own file (see UnityYamlWriter) regardless of which side
             // reads as "older" for display — a component only on B has nothing there yet to delete
             // (FileId 0).
-            var rows = new List<MockRow> { new() { IsHeader = true, Property = label, HeaderIcon = IconForComponentType(typeName), FileId = compA?.FileId ?? 0, HeaderStateA = headerStateA, HeaderStateB = headerStateB } };
+            var rows = new List<MockRow> { new() { IsHeader = true, Property = label, HeaderIcon = IconForComponentType(typeName), FileId = compA?.FileId ?? 0, DocumentIdB = compB?.FileId ?? 0, HeaderStateA = headerStateA, HeaderStateB = headerStateB } };
             rows.AddRange(fieldRows);
             return rows;
         }

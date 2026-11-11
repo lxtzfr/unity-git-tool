@@ -121,7 +121,8 @@ namespace UnityGitTool
             void DeleteComponent(long componentId, long ownerId)
             {
                 if (!toDelete.Add(componentId)) return;
-                if (!toDelete.Contains(ownerId)) componentOwners[componentId] = ownerId;
+                // 0: a standalone document (embedded Mesh...), listed in no m_Component.
+                if (ownerId != 0 && !toDelete.Contains(ownerId)) componentOwners[componentId] = ownerId;
             }
 
             void DeleteGameObject(long goId)
@@ -198,6 +199,13 @@ namespace UnityGitTool
                     AddTarget(parentTransformId, "m_Children", transformId);
                 else
                     skipped.Add($"GameObject: deleted, but its parent #{parentId}'s own Transform wasn't found — file may need a manual cleanup pass");
+
+            // A deleted scene-root Transform would otherwise stay listed as a `- {fileID: 0}` root.
+            if (baseById.Values.FirstOrDefault(d => d.TypeName == "SceneRoots") is { } sceneRoots)
+                foreach (var id in toDelete)
+                    if (baseById.TryGetValue(id, out var doc) && doc.TypeName is "Transform" or "RectTransform" &&
+                        TryGetReferenceFileId(doc, "m_Father", out var fatherId) && fatherId == 0)
+                        AddTarget(sceneRoots.FileId, "m_Roots", id);
 
             foreach (var ((ownerDocId, fieldKey), targetIds) in targetsByField)
                 foreach (var edit in BuildReferenceRemovalEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
@@ -280,7 +288,7 @@ namespace UnityGitTool
 
                 foreach (var (key, span) in doc.FieldSpans)
                 {
-                    if (key is "m_Component" or "m_Children") continue; // already handled precisely by BuildReferenceCleanupEdits
+                    if (key is "m_Component" or "m_Children" or "m_Roots") continue; // already handled precisely by BuildReferenceCleanupEdits
 
                     for (var i = span.Start; i < span.End; i++)
                     {
