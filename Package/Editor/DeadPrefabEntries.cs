@@ -16,6 +16,8 @@ namespace UnityGitTool
     {
         public DeadEntryKind Kind;
         public long InstanceId;
+        /// <summary>As the Hierarchy names the instance.</summary>
+        public string InstanceName;
         public string TargetGuid;
         public long TargetId;
         /// <summary><see cref="DeadEntryKind.Override"/> only.</summary>
@@ -47,7 +49,13 @@ namespace UnityGitTool
         {
             var dead = new List<DeadPrefabEntry>();
             foreach (var instance in byId.Values.Where(d => !d.Stripped && d.TypeName == "PrefabInstance"))
-                dead.AddRange(Find(instance, byId, sources));
+            {
+                var found = Find(instance, byId, sources).ToList();
+                if (found.Count == 0) continue;
+                var name = UnityYamlDiffBuilder.ResolvePrefabInstanceName(instance, UnityYamlDiffBuilder.GetPrefabSourceGuid(instance)) ?? $"PrefabInstance #{instance.FileId}";
+                foreach (var entry in found) entry.InstanceName = name;
+                dead.AddRange(found);
+            }
             return dead;
         }
 
@@ -117,8 +125,8 @@ namespace UnityGitTool
 
         // ------------------------------------------------------------------ project scan --
 
-        [MenuItem("Unity Git Tool/Find Dead Prefab Entries", priority = 20)]
-        private static void FindInProject()
+        /// <summary>Every prefab and scene under Assets/ with dead entries, by path; null when cancelled.</summary>
+        public static Dictionary<string, List<DeadPrefabEntry>> ScanProject()
         {
             var watch = System.Diagnostics.Stopwatch.StartNew();
             var sources = new YamlHierarchy.SourceCache();
@@ -127,14 +135,18 @@ namespace UnityGitTool
                 .Where(p => p.EndsWith(".prefab") || p.EndsWith(".unity"))
                 // Imported samples ship with their own dead entries; _Recovery holds Unity's crash backups.
                 .Where(p => !p.StartsWith("Assets/Samples/") && !p.StartsWith("Assets/_Recovery/"))
-                .Distinct().ToList();
+                .Distinct().OrderBy(p => p).ToList();
 
             var byFile = new Dictionary<string, List<DeadPrefabEntry>>();
             try
             {
                 for (var i = 0; i < paths.Count; i++)
                 {
-                    if (EditorUtility.DisplayCancelableProgressBar("Unity Git Tool", $"Scanning {paths[i]}", (float)i / paths.Count)) return;
+                    if (EditorUtility.DisplayCancelableProgressBar("Unity Git Tool", $"Scanning {paths[i]}", (float)i / paths.Count))
+                    {
+                        Debug.Log("[UnityGitTool] Dead prefab entries: scan cancelled");
+                        return null;
+                    }
                     var byId = UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(paths[i])));
                     var dead = Find(byId, sources);
                     if (dead.Count > 0) byFile[paths[i]] = dead;
@@ -142,22 +154,13 @@ namespace UnityGitTool
             }
             finally { EditorUtility.ClearProgressBar(); }
 
-            var total = byFile.Values.Sum(l => l.Count);
-            Debug.Log($"[UnityGitTool] Dead prefab entries: {total} in {byFile.Count} of {paths.Count} files ({watch.ElapsedMilliseconds} ms)");
-            if (total == 0)
-            {
-                EditorUtility.DisplayDialog("Unity Git Tool", $"No dead prefab entry in {paths.Count} prefabs and scenes.", "OK");
-                return;
-            }
-            foreach (var (path, entries) in byFile)
-                Debug.LogWarning($"[UnityGitTool] {path}: {entries.Count} dead prefab entr(ies) — Unity ignores them on load\n" +
-                                 string.Join("\n", entries.Select(e => $"  {e}")), AssetDatabase.LoadMainAssetAtPath(path));
+            Debug.Log($"[UnityGitTool] Dead prefab entries: {byFile.Values.Sum(l => l.Count)} in {byFile.Count} of {paths.Count} files ({watch.ElapsedMilliseconds} ms)");
+            return byFile;
+        }
 
-            var list = string.Join("\n", byFile.Take(12).Select(kv => $"• {kv.Key} ({kv.Value.Count})")) + (byFile.Count > 12 ? $"\n… +{byFile.Count - 12} more" : "");
-            if (!EditorUtility.DisplayDialog("Unity Git Tool",
-                    $"{total} prefab instance entr(ies) point at objects that no longer exist in their source (listed in the Console). " +
-                    $"Unity ignores them on load; its next save of the file drops the added objects and keeps the rest.\n\n{list}", "Clean them", "Keep")) return;
-
+        /// <summary>Cleans several files under one import batch; returns the problems.</summary>
+        public static List<string> Clean(IReadOnlyDictionary<string, List<DeadPrefabEntry>> byFile)
+        {
             var problems = new List<string>();
             AssetDatabase.StartAssetEditing();
             try
@@ -170,8 +173,7 @@ namespace UnityGitTool
             }
             finally { AssetDatabase.StopAssetEditing(); }
             foreach (var problem in problems) Debug.LogWarning($"[UnityGitTool] {problem}");
-            EditorUtility.DisplayDialog("Unity Git Tool",
-                problems.Count == 0 ? $"Cleaned {total} entr(ies) in {byFile.Count} file(s)." : $"Cleaned with {problems.Count} problem(s), see the Console.", "OK");
+            return problems;
         }
     }
 }

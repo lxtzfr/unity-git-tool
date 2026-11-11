@@ -327,7 +327,7 @@ namespace UnityGitTool
             _table.Rebuild();
         }
 
-        private static VisualElement MakePropertyCell()
+        internal static VisualElement MakePropertyCell()
         {
             var cell = new VisualElement();
             cell.AddToClassList("gt-cell");
@@ -342,7 +342,7 @@ namespace UnityGitTool
             return cell;
         }
 
-        private static void BindPropertyCell(VisualElement element, SceneYamlRow row)
+        internal static void BindPropertyCell(VisualElement element, SceneYamlRow row)
         {
             var icon = (Image)element[0];
             var label = (Label)element[1];
@@ -354,7 +354,7 @@ namespace UnityGitTool
             element.EnableInClassList("gt-row-overridden", row.Overridden);
         }
 
-        private static VisualElement MakeValueCell()
+        internal static VisualElement MakeValueCell()
         {
             var cell = new VisualElement();
             cell.AddToClassList("gt-cell");
@@ -362,7 +362,7 @@ namespace UnityGitTool
             return cell;
         }
 
-        private static void BindValueCell(VisualElement element, SceneYamlRow row)
+        internal static void BindValueCell(VisualElement element, SceneYamlRow row)
         {
             element.Clear(); // cells are recycled across rows, the previous field type may differ
             element.EnableInClassList("gt-row-header", row.IsHeader);

@@ -45,7 +45,7 @@ namespace UnityGitTool
         private static readonly Color BadgeOrange = new(0.95f, 0.62f, 0.15f);
         private static readonly Color BadgeRed = new(0.85f, 0.35f, 0.3f);
 
-        private enum Tab { Diff, SceneObjects }
+        private enum Tab { Diff, SceneObjects, DeadEntries }
 
         // Serialized: the window reopens on the same tab after a domain reload or an Editor restart.
         [SerializeField] private Tab _tab;
@@ -53,12 +53,17 @@ namespace UnityGitTool
         private VisualElement _diffPane;
         private VisualElement _scenePane;
         private SceneObjectsPanel _scenePanel;
+        private VisualElement _deadPane;
+        private DeadEntriesPanel _deadPanel;
 
         [MenuItem("Unity Git Tool/Diff - Merge", priority = 0)]
         private static void Open() => OpenTab(Tab.Diff);
 
         [MenuItem("Unity Git Tool/Scene Objects", priority = 1)]
         private static void OpenSceneObjects() => OpenTab(Tab.SceneObjects);
+
+        [MenuItem("Unity Git Tool/Dead Prefab Entries", priority = 2)]
+        private static void OpenDeadEntries() => OpenTab(Tab.DeadEntries);
 
         private static void OpenTab(Tab tab)
         {
@@ -80,17 +85,24 @@ namespace UnityGitTool
             _scenePanel = new SceneObjectsPanel();
             _scenePane = _scenePanel.Build();
             root.Add(_scenePane);
+            _deadPanel = new DeadEntriesPanel();
+            _deadPane = _deadPanel.Build();
+            root.Add(_deadPane);
             SelectTab(_tab);
         }
 
-        private void OnDisable() => _scenePanel?.Hide();
+        private void OnDisable()
+        {
+            _scenePanel?.Hide();
+            _deadPanel?.Hide();
+        }
 
         private VisualElement BuildTabBar()
         {
             var bar = new VisualElement();
             bar.AddToClassList("gt-tabs");
             _tabButtons.Clear();
-            foreach (var (tab, label) in new[] { (Tab.Diff, "Diff / Merge"), (Tab.SceneObjects, "Scene Objects") })
+            foreach (var (tab, label) in new[] { (Tab.Diff, "Diff / Merge"), (Tab.SceneObjects, "Scene Objects"), (Tab.DeadEntries, "Dead Entries") })
             {
                 var button = new Button(() => SelectTab(tab)) { text = label };
                 button.AddToClassList("gt-tab");
@@ -107,8 +119,10 @@ namespace UnityGitTool
             foreach (var (key, button) in _tabButtons) button.EnableInClassList("gt-tab-active", key == tab);
             _diffPane.style.display = tab == Tab.Diff ? DisplayStyle.Flex : DisplayStyle.None;
             _scenePane.style.display = tab == Tab.SceneObjects ? DisplayStyle.Flex : DisplayStyle.None;
+            _deadPane.style.display = tab == Tab.DeadEntries ? DisplayStyle.Flex : DisplayStyle.None;
             if (tab == Tab.SceneObjects) _scenePanel.Show();
             else _scenePanel.Hide();
+            if (tab == Tab.DeadEntries) _deadPanel.Show();
             Debug.Log($"[UnityGitTool] Tab: {tab}");
         }
 
