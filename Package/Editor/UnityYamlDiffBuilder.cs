@@ -36,11 +36,11 @@ namespace UnityGitTool
             "serializedVersion",
         };
 
-        private static readonly HashSet<string> GameObjectIgnoredKeys = new(CommonIgnoredKeys) { "m_Component" };
+        internal static readonly HashSet<string> GameObjectIgnoredKeys = new(CommonIgnoredKeys) { "m_Component" };
 
         // m_GameObject/m_Father/m_Children/m_RootOrder are hierarchy structure, not a component's
         // own data; m_Script identifies which MonoBehaviour class this is, not a value to diff.
-        private static readonly HashSet<string> ComponentIgnoredKeys = new(CommonIgnoredKeys)
+        internal static readonly HashSet<string> ComponentIgnoredKeys = new(CommonIgnoredKeys)
         {
             "m_GameObject", "m_Father", "m_Children", "m_RootOrder", "m_Script",
         };
@@ -247,7 +247,7 @@ namespace UnityGitTool
             return ResolveTransformOwnerGameObjectId(parentTransformId, byIdA, byIdB, visited ?? new HashSet<long>());
         }
 
-        private static bool TryGetFileId(Dictionary<string, object> map, out long fileId)
+        internal static bool TryGetFileId(Dictionary<string, object> map, out long fileId)
         {
             fileId = 0;
             return map.TryGetValue("fileID", out var raw) && raw is string s && long.TryParse(s, out fileId);
@@ -585,23 +585,16 @@ namespace UnityGitTool
 
             foreach (var (targetId, entries) in changedByTarget)
             {
-                var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
-                var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
-                var owner = resolved switch
-                {
-                    UnityEngine.Component c => c.gameObject,
-                    UnityEngine.GameObject go => go,
-                    _ => null,
-                };
-                object groupKey = owner != null ? owner : targetId;
+                var target = DescribeModificationTarget(sourceGuid, targetId);
+                object groupKey = target.Owner != null ? target.Owner : targetId;
                 if (!groupIndexByKey.TryGetValue(groupKey, out var groupIndex))
                 {
                     groupIndex = rowsByObject.Count;
                     groupIndexByKey[groupKey] = groupIndex;
-                    rowsByObject.Add((owner != null ? owner.name : label, new List<MockRow>()));
+                    rowsByObject.Add((target.OwnerLabel, new List<MockRow>()));
                 }
                 var targetRows = rowsByObject[groupIndex].Rows;
-                targetRows.Add(new MockRow { IsHeader = true, Property = label, HeaderIcon = IconForModificationTarget(resolved) });
+                targetRows.Add(new MockRow { IsHeader = true, Property = target.Label, HeaderIcon = target.Icon });
 
                 foreach (var (propertyPath, entryA, entryB) in entries)
                 {
@@ -705,7 +698,7 @@ namespace UnityGitTool
         /// <c>"m_Modification.m_Modifications::"</c>) resolves on either side independently of
         /// position. An entry missing either half of that identity is skipped — same "best effort" as
         /// the parser's own span tracking for this shape.</summary>
-        private static Dictionary<string, Dictionary<string, object>> GetModificationEntries(GitYamlDocument instance)
+        internal static Dictionary<string, Dictionary<string, object>> GetModificationEntries(GitYamlDocument instance)
         {
             var result = new Dictionary<string, Dictionary<string, object>>();
             if (instance == null ||
@@ -727,7 +720,7 @@ namespace UnityGitTool
         /// GameObjects) — canonical empty form is always present (<c>fieldKey: []</c>), so a missing
         /// PrefabInstance/field just reads as an empty list rather than null, keeping every caller's
         /// comparison logic simple.</summary>
-        private static List<object> GetModificationList(GitYamlDocument instance, string fieldKey) =>
+        internal static List<object> GetModificationList(GitYamlDocument instance, string fieldKey) =>
             instance != null && instance.Fields.TryGetValue("m_Modification", out var modRaw) && modRaw is Dictionary<string, object> modMap &&
             modMap.TryGetValue(fieldKey, out var listRaw) && listRaw is List<object> list ? list : new List<object>();
 
@@ -738,7 +731,7 @@ namespace UnityGitTool
         /// unlike a modification TARGET, which points into the referenced prefab asset, an
         /// objectReference override points at another object in THIS same file/revision, same as any
         /// other local reference field).</summary>
-        private static object ResolveModificationValue(Dictionary<string, object> entry, Dictionary<long, GitYamlDocument> byId)
+        internal static object ResolveModificationValue(Dictionary<string, object> entry, Dictionary<long, GitYamlDocument> byId)
         {
             if (entry.TryGetValue("objectReference", out var refRaw) && refRaw is Dictionary<string, object> refMap &&
                 refMap.TryGetValue("fileID", out var fid) && fid is string fidStr && fidStr != "0")
@@ -750,12 +743,28 @@ namespace UnityGitTool
             return null;
         }
 
+        /// <summary>One override target (a fileID inside the instance's source prefab): its header label
+        /// and icon, and the GameObject it belongs to (a component's owner), which overrides are grouped
+        /// under. <c>Owner</c> is null when the target doesn't resolve; <c>OwnerLabel</c> is then the raw label.</summary>
+        internal static (string Label, string Icon, UnityEngine.GameObject Owner, string OwnerLabel) DescribeModificationTarget(string sourceGuid, string targetId)
+        {
+            var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
+            var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
+            var owner = resolved switch
+            {
+                UnityEngine.Component c => c.gameObject,
+                UnityEngine.GameObject go => go,
+                _ => null,
+            };
+            return (label, IconForModificationTarget(resolved), owner, owner != null ? owner.name : label);
+        }
+
         /// <summary>"m_LocalPosition.x" -> "Local Position X" — humanizes the leading serialized field
         /// name the normal way (<see cref="UnityYamlFieldNames.Humanize"/>) and appends any remaining
         /// dotted segments (a struct's axis, a list index) verbatim in upper case, Inspector-label
         /// style, rather than running the whole dotted string through the same regex (which has no
         /// concept of "." as a word boundary).</summary>
-        private static string HumanizePropertyPath(string propertyPath)
+        internal static string HumanizePropertyPath(string propertyPath)
         {
             var segments = propertyPath.Split('.');
             var head = UnityYamlFieldNames.Humanize(segments[0]);
@@ -766,7 +775,7 @@ namespace UnityGitTool
         /// PrefabInstance's source prefab the same way <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>
         /// resolves any other nested-prefab reference — reused here so member names read the same way
         /// a stripped placeholder's own name would (see that method's own doc comment).</summary>
-        private static object[] ResolveListDisplay(List<object> list, string sourceGuid) => list.Select(entry =>
+        internal static object[] ResolveListDisplay(List<object> list, string sourceGuid) => list.Select(entry =>
         {
             if (sourceGuid != null && entry is Dictionary<string, object> map && map.TryGetValue("fileID", out var fid) && fid is string fidStr)
             {
@@ -781,14 +790,14 @@ namespace UnityGitTool
         /// so this one guid resolves all of them (see <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>).
         /// Null when the instance itself is missing or the field can't be read — every caller already
         /// falls back to a raw fileID display in that case.</summary>
-        private static string GetPrefabSourceGuid(GitYamlDocument instance) =>
+        internal static string GetPrefabSourceGuid(GitYamlDocument instance) =>
             instance != null && instance.Fields.TryGetValue("m_SourcePrefab", out var raw) && raw is Dictionary<string, object> map &&
             map.TryGetValue("guid", out var g) && g is string guid ? guid : null;
 
         /// <summary>The name the Hierarchy shows for the instance: its root's <c>m_Name</c> override, else
         /// the source prefab root's name. Not resolved from <c>m_SourcePrefab</c>'s fileID: that is
         /// 100100000, the asset's internal prefab object, whose name is empty.</summary>
-        private static string ResolvePrefabInstanceName(GitYamlDocument instance, string sourceGuid)
+        internal static string ResolvePrefabInstanceName(GitYamlDocument instance, string sourceGuid)
         {
             if (sourceGuid == null) return null;
             var path = AssetDatabase.GUIDToAssetPath(sourceGuid);
@@ -808,7 +817,7 @@ namespace UnityGitTool
         /// "<c>Name (ComponentType)</c>" (its own bare <c>.name</c> just proxies to its GameObject's,
         /// losing exactly the type info a raw fileID/propertyPath dump would otherwise force the user
         /// to guess at), anything else falls back to its own string form.</summary>
-        private static string DescribeResolvedTarget(object resolved) => resolved switch
+        internal static string DescribeResolvedTarget(object resolved) => resolved switch
         {
             null => null,
             UnityEngine.Component c => $"{c.name} ({c.GetType().Name})",
@@ -817,14 +826,14 @@ namespace UnityGitTool
             _ => resolved.ToString(),
         };
 
-        private static string IconForModificationTarget(object resolved) => resolved switch
+        internal static string IconForModificationTarget(object resolved) => resolved switch
         {
             UnityEngine.GameObject => "GameObject Icon",
             UnityEngine.Component c => IconForComponentType(c.GetType().Name),
             _ => "GameObject Icon",
         };
 
-        private static string IconForComponentType(string typeName) => typeName switch
+        internal static string IconForComponentType(string typeName) => typeName switch
         {
             "Transform" or "RectTransform" => "Transform Icon",
             "MeshRenderer" or "SkinnedMeshRenderer" => "MeshRenderer Icon",
@@ -841,7 +850,7 @@ namespace UnityGitTool
         /// (e.g. "KioskManager") via the referenced MonoScript asset — falls back to the script
         /// asset's filename if the class can't be loaded (e.g. a compile error), and to the bare
         /// "MonoBehaviour" tag if m_Script itself can't be resolved at all (missing script).</summary>
-        private static string ResolveScriptLabel(GitYamlDocument component)
+        internal static string ResolveScriptLabel(GitYamlDocument component)
         {
             if (component != null &&
                 component.Fields.TryGetValue("m_Script", out var scriptRef) &&

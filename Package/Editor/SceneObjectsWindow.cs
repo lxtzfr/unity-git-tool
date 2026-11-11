@@ -1,34 +1,32 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
-using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>The active scene laid out like the diff window: GameObject tree on the left,
-    /// Property | Value table of the selected GameObject's components on the right, live and editable.</summary>
+    /// <summary>The active scene's saved file, read from its YAML like the diff window reads a revision:
+    /// GameObject tree on the left, Property | Value of the selected object on the right (read-only).
+    /// Selection is synced with the Hierarchy through each object's GlobalObjectId.</summary>
     public class SceneObjectsWindow : EditorWindow
     {
-        private class Row
-        {
-            public string Property;
-            public bool IsHeader;
-            public Texture HeaderIcon;
-            public SerializedProperty SerializedProperty;
-        }
-
         private TreeView _tree;
         private MultiColumnListView _table;
         private Label _statusLabel;
-        private readonly List<Row> _rows = new();
-        private GameObject _selected;
-        // Our own tree selection pushes Selection.activeGameObject, which fires selectionChanged straight back.
+        private List<SceneYamlRow> _rows = new();
+        private Dictionary<long, GitYamlDocument> _byId = new();
+        private string _scenePath;
+        private string _sceneGuid;
+        private int _gameObjectCount;
+        // (targetObjectId, targetPrefabId) of a node's GlobalObjectId -> tree id, for Hierarchy -> tree.
+        private readonly Dictionary<(ulong, ulong), int> _treeIdByObject = new();
+        // Our own tree selection pushes Selection.activeObject, which fires selectionChanged straight back.
         private bool _syncingSelection;
-        // GetTreeCount() / viewController throw until the first SetRootItems.
+        // viewController / SetSelectionById throw until the first SetRootItems.
         private bool _treeBuilt;
 
         [MenuItem("Unity Git Tool/Scene Objects", priority = 1)]
@@ -40,18 +38,18 @@ namespace UnityGitTool
 
         private void OnEnable()
         {
-            EditorApplication.hierarchyChanged += RefreshTree;
             EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+            EditorSceneManager.sceneSaved += OnSceneSaved;
+            EditorSceneManager.sceneDirtied += OnSceneDirtied;
             Selection.selectionChanged += OnEditorSelectionChanged;
-            ObjectChangeEvents.changesPublished += OnChangesPublished;
         }
 
         private void OnDisable()
         {
-            EditorApplication.hierarchyChanged -= RefreshTree;
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorSceneManager.sceneSaved -= OnSceneSaved;
+            EditorSceneManager.sceneDirtied -= OnSceneDirtied;
             Selection.selectionChanged -= OnEditorSelectionChanged;
-            ObjectChangeEvents.changesPublished -= OnChangesPublished;
         }
 
         private void CreateGUI()
@@ -67,8 +65,20 @@ namespace UnityGitTool
             root.Add(split);
             root.Add(BuildFooter());
 
-            RefreshTree();
+            Reload();
             OnEditorSelectionChanged();
+        }
+
+        private void OnActiveSceneChanged(Scene previous, Scene next) => Reload();
+
+        private void OnSceneSaved(Scene scene)
+        {
+            if (scene.path == _scenePath) Reload();
+        }
+
+        private void OnSceneDirtied(Scene scene)
+        {
+            if (scene.path == _scenePath) UpdateStatus();
         }
 
         // --------------------------------------------------------------------------- tree --
@@ -83,7 +93,7 @@ namespace UnityGitTool
                 fixedItemHeight = 24,
                 showAlternatingRowBackgrounds = AlternatingRowBackground.ContentOnly,
                 makeItem = BuildTreeRow,
-                bindItem = (element, index) => BindTreeRow(element, _tree.GetItemDataForIndex<GameObject>(index)),
+                bindItem = (element, index) => BindTreeRow(element, _tree.GetItemDataForIndex<SceneYamlNode>(index)),
             };
             _treeBuilt = false;
             _tree.AddToClassList("gt-tree");
@@ -92,35 +102,60 @@ namespace UnityGitTool
             return pane;
         }
 
-        private void RefreshTree()
+        /// <summary>Re-reads the active scene's file from disk and rebuilds the tree, keeping what was
+        /// expanded (tree ids are rebuilt, so expansion is matched by GlobalObjectId).</summary>
+        private void Reload()
         {
             if (_tree == null) return;
 
             var scene = SceneManager.GetActiveScene();
-            var roots = scene.GetRootGameObjects().Select(BuildItem).ToList();
-            // Ids are instance ids, stable across rebuilds, so the expanded state survives a hierarchy change.
+            _scenePath = scene.path;
+            _sceneGuid = AssetDatabase.AssetPathToGUID(_scenePath);
+            _byId = string.IsNullOrEmpty(_scenePath) || !File.Exists(_scenePath)
+                ? new Dictionary<long, GitYamlDocument>()
+                : UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(_scenePath)));
+
+            var expandedObjects = new HashSet<(ulong, ulong)>();
+            if (_treeBuilt)
+                foreach (var (key, id) in _treeIdByObject)
+                    if (_tree.IsExpanded(id)) expandedObjects.Add(key);
+
+            var nextId = 0;
+            var roots = SceneYamlTree.Build(_byId, () => nextId++);
+            _treeIdByObject.Clear();
+            _gameObjectCount = 0;
+            IndexNodes(roots);
+
             var firstBuild = !_treeBuilt;
             _treeBuilt = true;
-            var expanded = firstBuild ? new List<int>() : _tree.viewController.GetAllItemIds().Where(_tree.IsExpanded).ToList();
-
             _tree.SetRootItems(roots);
             _tree.Rebuild();
             if (firstBuild) _tree.ExpandRootItems();
-            else foreach (var id in expanded) _tree.ExpandItem(id);
+            else
+                foreach (var (key, id) in _treeIdByObject)
+                    if (expandedObjects.Contains(key)) _tree.ExpandItem(id);
 
-            SetStatus($"{scene.name} — {CountGameObjects(roots)} GameObjects");
-            if (_selected == null) ShowComponents(null); // the selected one was destroyed
+            ShowRows(null);
+            UpdateStatus();
         }
 
-        private static TreeViewItemData<GameObject> BuildItem(GameObject go)
+        private void IndexNodes(IEnumerable<TreeViewItemData<SceneYamlNode>> items)
         {
-            var children = new List<TreeViewItemData<GameObject>>(go.transform.childCount);
-            foreach (Transform child in go.transform) children.Add(BuildItem(child.gameObject));
-            return new TreeViewItemData<GameObject>(go.GetInstanceID(), go, children);
+            foreach (var item in items)
+            {
+                if (item.data.Kind == SceneYamlNodeKind.GameObject) _gameObjectCount++;
+                _treeIdByObject.TryAdd(ObjectKey(item.data), item.id);
+                IndexNodes(item.children);
+            }
         }
 
-        private static int CountGameObjects(IEnumerable<TreeViewItemData<GameObject>> items) =>
-            items.Sum(item => 1 + CountGameObjects(item.children));
+        private void UpdateStatus()
+        {
+            if (_statusLabel == null) return;
+            if (string.IsNullOrEmpty(_scenePath)) { _statusLabel.text = "The active scene has never been saved: no file to read."; return; }
+            var dirty = SceneManager.GetActiveScene().isDirty ? " — unsaved changes are not shown until the scene is saved" : "";
+            _statusLabel.text = $"{_scenePath} — {_gameObjectCount} GameObjects (saved file){dirty}";
+        }
 
         private static VisualElement BuildTreeRow()
         {
@@ -138,46 +173,34 @@ namespace UnityGitTool
             return row;
         }
 
-        private static void BindTreeRow(VisualElement element, GameObject go)
+        private static void BindTreeRow(VisualElement element, SceneYamlNode node)
         {
-            var icon = (Image)element[0];
-            var label = (Label)element[1];
-            icon.image = go != null ? HierarchyIcon(go) : null;
-            label.text = go != null ? go.name : "(destroyed)";
-            label.style.opacity = go != null && go.activeInHierarchy ? 1f : 0.5f;
+            ((Image)element[0]).image = UnityGitToolWindow.GetIcon(node.Icon);
+            ((Label)element[1]).text = node.Label;
         }
 
-        /// <summary>The icon the Hierarchy shows. AssetPreview.GetMiniThumbnail gives the prefab icon to
-        /// every object inside an instance, children included; the Hierarchy keeps it for the instance
-        /// root only, and tells regular / variant / model prefabs apart.</summary>
-        private static Texture HierarchyIcon(GameObject go)
-        {
-            if (PrefabUtility.IsAnyPrefabInstanceRoot(go))
-            {
-                // Typed from the nearest instance's own asset: GetPrefabAssetType(go) answers for the outermost
-                // prefab, so an FBX nested in a regular prefab would read as Regular.
-                var asset = AssetDatabase.LoadMainAssetAtPath(PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go));
-                return UnityGitToolWindow.GetIcon(asset == null ? "Prefab Icon" : PrefabUtility.GetPrefabAssetType(asset) switch
-                {
-                    PrefabAssetType.Model => "PrefabModel Icon",
-                    PrefabAssetType.Variant => "PrefabVariant Icon",
-                    _ => "Prefab Icon",
-                });
-            }
-            // An icon picked in the Inspector's icon menu wins over the default cube.
-            var custom = EditorGUIUtility.GetIconForObject(go);
-            return custom != null ? custom : UnityGitToolWindow.GetIcon("GameObject Icon");
-        }
+        // -------------------------------------------------------------------- selection --
+
+        /// <summary>The (targetObjectId, targetPrefabId) pair Unity's GlobalObjectId gives the loaded
+        /// object: the scene fileID for a plain GameObject; for an object inside a prefab instance, its
+        /// fileID in the source prefab, with the instance's fileID as prefab id.</summary>
+        private static (ulong, ulong) ObjectKey(SceneYamlNode node) => node.Kind == SceneYamlNodeKind.GameObject
+            ? ((ulong)node.FileId, 0UL)
+            : ((ulong)node.SourceFileId, (ulong)node.PrefabInstanceId);
 
         private void OnTreeSelectionChanged(IEnumerable<object> selection)
         {
-            if (_syncingSelection) return;
-            var go = selection.FirstOrDefault() as GameObject;
-            ShowComponents(go);
-            if (go == null) return;
+            var node = selection.FirstOrDefault() as SceneYamlNode;
+            ShowRows(node);
+            if (_syncingSelection || node == null || string.IsNullOrEmpty(_sceneGuid)) return;
+
+            var (objectId, prefabId) = ObjectKey(node);
+            if (!GlobalObjectId.TryParse($"GlobalObjectId_V1-2-{_sceneGuid}-{objectId}-{prefabId}", out var globalId)) return;
+            var target = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(globalId);
+            if (target == null) return; // only in the saved file (deleted since), or the scene isn't loaded
 
             _syncingSelection = true;
-            try { Selection.activeGameObject = go; }
+            try { Selection.activeObject = target; }
             finally { _syncingSelection = false; }
         }
 
@@ -185,26 +208,15 @@ namespace UnityGitTool
         {
             if (_syncingSelection || !_treeBuilt) return;
             var go = Selection.activeGameObject;
-            if (go == null || go.scene != SceneManager.GetActiveScene()) return; // a prefab asset, another scene
+            if (go == null || go.scene.path != _scenePath) return; // a prefab asset, another scene
+
+            var globalId = GlobalObjectId.GetGlobalObjectIdSlow(go);
+            if (!_treeIdByObject.TryGetValue((globalId.targetObjectId, globalId.targetPrefabId), out var treeId)) return; // not in the saved file yet, or inside a prefab without an override
 
             _syncingSelection = true;
-            try { _tree.SetSelectionById(go.GetInstanceID()); }
+            try { _tree.SetSelectionById(treeId); }
             finally { _syncingSelection = false; }
-            _tree.ScrollToItemById(go.GetInstanceID());
-            ShowComponents(go);
-        }
-
-        private void OnActiveSceneChanged(Scene previous, Scene next)
-        {
-            _selected = null;
-            RefreshTree();
-        }
-
-        private void OnChangesPublished(ref ObjectChangeEventStream stream)
-        {
-            // Component added/removed or a value edited elsewhere (Inspector, undo): rebind the table.
-            if (_selected != null) ShowComponents(_selected);
-            _tree?.RefreshItems(); // names / active state
+            _tree.ScrollToItemById(treeId);
         }
 
         // -------------------------------------------------------------------------- table --
@@ -220,7 +232,6 @@ namespace UnityGitTool
                 // Rows must grow to fit multi-line content (arrays, structs).
                 virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight,
                 selectionType = SelectionType.None,
-                itemsSource = _rows,
             };
             _table.columns.Add(new Column
             {
@@ -239,40 +250,12 @@ namespace UnityGitTool
             return pane;
         }
 
-        /// <summary>One header row for the GameObject, then per component a header row followed by its
-        /// visible top-level serialized properties (what the Inspector draws, minus the script field).</summary>
-        private void ShowComponents(GameObject go)
+        private void ShowRows(SceneYamlNode node)
         {
-            _selected = go;
-            _rows.Clear();
-            if (go != null)
-            {
-                _rows.Add(new Row { IsHeader = true, Property = go.name, HeaderIcon = HierarchyIcon(go) });
-                foreach (var component in go.GetComponents<Component>())
-                {
-                    if (component == null)
-                    {
-                        _rows.Add(new Row { IsHeader = true, Property = "(Missing Script)", HeaderIcon = UnityGitToolWindow.GetIcon("console.warnicon") });
-                        continue;
-                    }
-
-                    _rows.Add(new Row
-                    {
-                        IsHeader = true,
-                        Property = ObjectNames.NicifyVariableName(component.GetType().Name),
-                        HeaderIcon = EditorGUIUtility.ObjectContent(component, component.GetType()).image,
-                    });
-
-                    var serializedObject = new SerializedObject(component);
-                    var property = serializedObject.GetIterator();
-                    for (var enterChildren = true; property.NextVisible(enterChildren); enterChildren = false)
-                    {
-                        if (property.propertyPath == "m_Script") continue;
-                        _rows.Add(new Row { Property = property.displayName, SerializedProperty = property.Copy() });
-                    }
-                }
-            }
-            _table?.Rebuild();
+            _rows = node != null ? SceneYamlTree.BuildRows(node, _byId) : new List<SceneYamlRow>();
+            if (_table == null) return;
+            _table.itemsSource = _rows;
+            _table.Rebuild();
         }
 
         private static VisualElement MakePropertyCell()
@@ -290,14 +273,14 @@ namespace UnityGitTool
             return cell;
         }
 
-        private static void BindPropertyCell(VisualElement element, Row row)
+        private static void BindPropertyCell(VisualElement element, SceneYamlRow row)
         {
             var icon = (Image)element[0];
             var label = (Label)element[1];
             element.EnableInClassList("gt-row-header", row.IsHeader);
             label.EnableInClassList("gt-row-header-label", row.IsHeader);
             icon.style.display = row.IsHeader ? DisplayStyle.Flex : DisplayStyle.None;
-            icon.image = row.HeaderIcon;
+            icon.image = row.IsHeader ? UnityGitToolWindow.GetIcon(row.HeaderIcon) : null;
             label.text = row.Property;
         }
 
@@ -309,55 +292,12 @@ namespace UnityGitTool
             return cell;
         }
 
-        private static void BindValueCell(VisualElement element, Row row)
+        private static void BindValueCell(VisualElement element, SceneYamlRow row)
         {
             element.Clear(); // cells are recycled across rows, the previous field type may differ
             element.EnableInClassList("gt-row-header", row.IsHeader);
-            if (row.IsHeader) return;
-            element.Add(CreateValueField(row.SerializedProperty));
+            if (!row.IsHeader) element.Add(FieldFactory.Create(row.Value));
         }
-
-        /// <summary>The diff table's own controls (FieldFactory), written back through the
-        /// SerializedProperty (undoable). Object references bind an ObjectField (FieldFactory leaves a
-        /// null one empty); enums, arrays, structs and managed references fall back to an unlabeled PropertyField.</summary>
-        private static VisualElement CreateValueField(SerializedProperty property)
-        {
-            if (property.propertyType == SerializedPropertyType.ObjectReference)
-            {
-                var objectField = new ObjectField { allowSceneObjects = true };
-                objectField.AddToClassList("gt-value-field");
-                objectField.BindProperty(property);
-                return objectField;
-            }
-
-            // Enum: boxedValue is the raw int, so FieldFactory would draw an IntegerField; PropertyField draws the dropdown.
-            var isPlainValue = property.propertyType is not (SerializedPropertyType.Generic or SerializedPropertyType.ManagedReference or SerializedPropertyType.Enum)
-                               && (!property.isArray || property.propertyType == SerializedPropertyType.String);
-            object value = null;
-            if (isPlainValue)
-            {
-                try { value = property.boxedValue; }
-                catch (System.Exception) { /* a type boxedValue can't read: PropertyField below */ }
-            }
-            if (value != null)
-            {
-                return FieldFactory.Create(value, enabled: property.editable, onValueChanged: v =>
-                {
-                    property.serializedObject.Update();
-                    property.boxedValue = ConvertBack(property, v);
-                    property.serializedObject.ApplyModifiedProperties();
-                });
-            }
-
-            var field = new PropertyField(property, string.Empty);
-            field.AddToClassList("gt-value-field");
-            field.Bind(property.serializedObject);
-            return field;
-        }
-
-        /// <summary>FieldFactory shows a Quaternion as euler angles; map that edit back to the property's own type.</summary>
-        private static object ConvertBack(SerializedProperty property, object value) =>
-            property.propertyType == SerializedPropertyType.Quaternion && value is Vector3 euler ? Quaternion.Euler(euler) : value;
 
         // ------------------------------------------------------------------------- footer --
 
@@ -371,11 +311,6 @@ namespace UnityGitTool
             _statusLabel = new Label();
             footer.Add(_statusLabel);
             return footer;
-        }
-
-        private void SetStatus(string message)
-        {
-            if (_statusLabel != null) _statusLabel.text = message;
         }
     }
 }
