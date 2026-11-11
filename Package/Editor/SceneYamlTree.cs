@@ -9,6 +9,10 @@ namespace UnityGitTool
 {
     internal sealed class SceneYamlNode
     {
+        public YamlHierarchy Hierarchy;
+        public string SceneGuid;
+        public string ScenePath;
+        /// <summary>Null on a scene's own node.</summary>
         public YamlObject GameObject;
         public string Label;
         public string Icon;
@@ -29,21 +33,37 @@ namespace UnityGitTool
     /// innermost objects (<see cref="YamlHierarchy"/>). Rows are built per node on demand.</summary>
     internal static class SceneYamlTree
     {
-        public static List<TreeViewItemData<SceneYamlNode>> Build(YamlHierarchy hierarchy, Func<int> nextId)
+        /// <summary>A scene's node (as the Hierarchy shows each open scene) over its root GameObjects;
+        /// <paramref name="hierarchy"/> is null for a scene with no file yet.</summary>
+        public static TreeViewItemData<SceneYamlNode> BuildScene(string label, string scenePath, YamlHierarchy hierarchy, Func<int> nextId)
         {
+            var scene = new SceneYamlNode
+            {
+                Hierarchy = hierarchy,
+                SceneGuid = string.IsNullOrEmpty(scenePath) ? null : AssetDatabase.AssetPathToGUID(scenePath),
+                ScenePath = scenePath,
+                Label = label,
+                Icon = "SceneAsset Icon",
+            };
             var icons = new Dictionary<string, string>();
-            return SceneRoots(hierarchy).Select(go => BuildNode(go, hierarchy, icons, nextId)).ToList();
+            var children = hierarchy == null
+                ? new List<TreeViewItemData<SceneYamlNode>>()
+                : SceneRoots(hierarchy).Select(go => BuildNode(go, scene, icons, nextId)).ToList();
+            return new TreeViewItemData<SceneYamlNode>(nextId(), scene, children);
         }
 
-        private static TreeViewItemData<SceneYamlNode> BuildNode(YamlObject go, YamlHierarchy hierarchy, Dictionary<string, string> icons, Func<int> nextId)
+        private static TreeViewItemData<SceneYamlNode> BuildNode(YamlObject go, SceneYamlNode scene, Dictionary<string, string> icons, Func<int> nextId)
         {
             var node = new SceneYamlNode
             {
+                Hierarchy = scene.Hierarchy,
+                SceneGuid = scene.SceneGuid,
+                ScenePath = scene.ScenePath,
                 GameObject = go,
                 Label = go.Name,
                 Icon = go.InstanceGuid != null ? PrefabIcon(go.InstanceGuid, icons) : "GameObject Icon",
             };
-            var children = hierarchy.ChildGameObjects(go).Select(child => BuildNode(child, hierarchy, icons, nextId)).ToList();
+            var children = scene.Hierarchy.ChildGameObjects(go).Select(child => BuildNode(child, scene, icons, nextId)).ToList();
             return new TreeViewItemData<SceneYamlNode>(nextId(), node, children);
         }
 
@@ -63,10 +83,17 @@ namespace UnityGitTool
 
         // ------------------------------------------------------------------------- rows --
 
-        public static List<SceneYamlRow> BuildRows(SceneYamlNode node, YamlHierarchy hierarchy)
+        public static List<SceneYamlRow> BuildRows(SceneYamlNode node)
         {
             var go = node.GameObject;
+            var hierarchy = node.Hierarchy;
             var rows = new List<SceneYamlRow> { new() { IsHeader = true, Property = node.Label, HeaderIcon = node.Icon } };
+            if (go == null)
+            {
+                if (!string.IsNullOrEmpty(node.ScenePath))
+                    rows.Add(new SceneYamlRow { Property = "Scene Asset", Value = AssetDatabase.LoadAssetAtPath<SceneAsset>(node.ScenePath) });
+                return rows;
+            }
             if (go.InstanceGuid != null)
             {
                 var path = AssetDatabase.GUIDToAssetPath(go.InstanceGuid);

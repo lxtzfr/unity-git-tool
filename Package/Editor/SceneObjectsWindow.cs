@@ -10,8 +10,8 @@ using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>The active scene's saved file, read from its YAML like the diff window reads a revision:
-    /// GameObject tree on the left, Property | Value of the selected object on the right (read-only).
+    /// <summary>The open scenes' saved files, read from their YAML like the diff window reads a revision:
+    /// one node per scene over its GameObject tree on the left, Property | Value of the selection on the right (read-only).
     /// Selection is synced with the Hierarchy through each object's GlobalObjectId.</summary>
     public class SceneObjectsWindow : EditorWindow
     {
@@ -19,12 +19,10 @@ namespace UnityGitTool
         private MultiColumnListView _table;
         private Label _statusLabel;
         private List<SceneYamlRow> _rows = new();
-        private YamlHierarchy _hierarchy;
-        private string _scenePath;
-        private string _sceneGuid;
         private int _gameObjectCount;
-        // (targetObjectId, targetPrefabId) of a node's GlobalObjectId -> tree id, for Hierarchy -> tree.
-        private readonly Dictionary<(ulong, ulong), int> _treeIdByObject = new();
+        // (scene guid, targetObjectId, targetPrefabId) of a node's GlobalObjectId -> tree id, for
+        // Hierarchy -> tree and to keep expansion across reloads. A scene's own node is (guid, 0, 0).
+        private readonly Dictionary<(string, ulong, ulong), int> _treeIdByObject = new();
         // Our own tree selection pushes Selection.activeObject, which fires selectionChanged straight back.
         private bool _syncingSelection;
         // viewController / SetSelectionById throw until the first SetRootItems.
@@ -40,6 +38,8 @@ namespace UnityGitTool
         private void OnEnable()
         {
             EditorSceneManager.activeSceneChangedInEditMode += OnActiveSceneChanged;
+            EditorSceneManager.sceneOpened += OnSceneOpened;
+            EditorSceneManager.sceneClosed += OnSceneClosed;
             EditorSceneManager.sceneSaved += OnSceneSaved;
             EditorSceneManager.sceneDirtied += OnSceneDirtied;
             Selection.selectionChanged += OnEditorSelectionChanged;
@@ -48,9 +48,13 @@ namespace UnityGitTool
         private void OnDisable()
         {
             EditorSceneManager.activeSceneChangedInEditMode -= OnActiveSceneChanged;
+            EditorSceneManager.sceneOpened -= OnSceneOpened;
+            EditorSceneManager.sceneClosed -= OnSceneClosed;
             EditorSceneManager.sceneSaved -= OnSceneSaved;
             EditorSceneManager.sceneDirtied -= OnSceneDirtied;
             Selection.selectionChanged -= OnEditorSelectionChanged;
+            EditorApplication.update -= ReloadOnce;
+            _reloadScheduled = false;
         }
 
         private void CreateGUI()
@@ -70,17 +74,30 @@ namespace UnityGitTool
             OnEditorSelectionChanged();
         }
 
-        private void OnActiveSceneChanged(Scene previous, Scene next) => Reload();
+        private void OnActiveSceneChanged(Scene previous, Scene next) => _tree?.RefreshItems(); // the bold label moves
+        private void OnSceneOpened(Scene scene, OpenSceneMode mode) => ScheduleReload();
+        private void OnSceneClosed(Scene scene) => ScheduleReload();
+        private void OnSceneSaved(Scene scene) => ScheduleReload();
 
-        private void OnSceneSaved(Scene scene)
+        // sceneClosed fires while the scene is still listed, and a Save All raises one event per scene:
+        // reload once, on the next editor update. Not delayCall: it doesn't run while the Editor is unfocused.
+        // NonSerialized: a domain reload keeps a window's private fields but drops the pending callback.
+        [System.NonSerialized] private bool _reloadScheduled;
+
+        private void ScheduleReload()
         {
-            if (scene.path == _scenePath) Reload();
+            if (_reloadScheduled) return;
+            _reloadScheduled = true;
+            EditorApplication.update += ReloadOnce;
         }
 
-        private void OnSceneDirtied(Scene scene)
+        private void ReloadOnce()
         {
-            if (scene.path == _scenePath) UpdateStatus();
+            EditorApplication.update -= ReloadOnce;
+            _reloadScheduled = false;
+            Reload();
         }
+        private void OnSceneDirtied(Scene scene) => UpdateStatus();
 
         // --------------------------------------------------------------------------- tree --
 
@@ -103,32 +120,38 @@ namespace UnityGitTool
             return pane;
         }
 
-        /// <summary>Re-reads the active scene's file from disk and rebuilds the tree, keeping what was
+        /// <summary>Re-reads every open scene's file from disk and rebuilds the tree, keeping what was
         /// expanded (tree ids are rebuilt, so expansion is matched by GlobalObjectId).</summary>
         private void Reload()
         {
             if (_tree == null) return;
 
-            var scene = SceneManager.GetActiveScene();
-            _scenePath = scene.path;
-            _sceneGuid = AssetDatabase.AssetPathToGUID(_scenePath);
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            var sources = new YamlHierarchy.SourceCache();
-            _hierarchy = YamlHierarchy.Resolve(string.IsNullOrEmpty(_scenePath) || !File.Exists(_scenePath)
-                ? new Dictionary<long, GitYamlDocument>()
-                : UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(_scenePath))), sources);
+            var sources = new YamlHierarchy.SourceCache(); // shared: scenes often place the same prefabs
+            var nextId = 0;
+            var roots = new List<TreeViewItemData<SceneYamlNode>>();
+            for (var i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var scene = SceneManager.GetSceneAt(i);
+                var hasFile = !string.IsNullOrEmpty(scene.path) && File.Exists(scene.path);
+                var hierarchy = hasFile
+                    ? YamlHierarchy.Resolve(UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(scene.path))), sources)
+                    : null;
+                var label = string.IsNullOrEmpty(scene.name) ? "Untitled" : scene.name;
+                if (!hasFile) label += " (never saved)";
+                else if (!scene.isLoaded) label += " (not loaded)";
+                roots.Add(SceneYamlTree.BuildScene(label, scene.path, hierarchy, () => nextId++));
+            }
 
-            var expandedObjects = new HashSet<(ulong, ulong)>();
+            var expandedObjects = new HashSet<(string, ulong, ulong)>();
             if (_treeBuilt)
                 foreach (var (key, id) in _treeIdByObject)
                     if (_tree.IsExpanded(id)) expandedObjects.Add(key);
 
-            var nextId = 0;
-            var roots = SceneYamlTree.Build(_hierarchy, () => nextId++);
             _treeIdByObject.Clear();
             _gameObjectCount = 0;
             IndexNodes(roots);
-            Debug.Log($"[UnityGitTool] Scene Objects: read {_scenePath} + {sources.FilesRead} prefab files, {_gameObjectCount} GameObjects in {watch.ElapsedMilliseconds} ms");
+            Debug.Log($"[UnityGitTool] Scene Objects: read {roots.Count} scenes + {sources.FilesRead} prefab files, {_gameObjectCount} GameObjects in {watch.ElapsedMilliseconds} ms");
 
             var firstBuild = !_treeBuilt;
             _treeBuilt = true;
@@ -147,7 +170,7 @@ namespace UnityGitTool
         {
             foreach (var item in items)
             {
-                _gameObjectCount++;
+                if (item.data.GameObject != null) _gameObjectCount++;
                 _treeIdByObject.TryAdd(ObjectKey(item.data), item.id);
                 IndexNodes(item.children);
             }
@@ -156,9 +179,9 @@ namespace UnityGitTool
         private void UpdateStatus()
         {
             if (_statusLabel == null) return;
-            if (string.IsNullOrEmpty(_scenePath)) { _statusLabel.text = "The active scene has never been saved: no file to read."; return; }
-            var dirty = SceneManager.GetActiveScene().isDirty ? " — unsaved changes are not shown until the scene is saved" : "";
-            _statusLabel.text = $"{_scenePath} — {_gameObjectCount} GameObjects (saved file){dirty}";
+            var dirty = Enumerable.Range(0, SceneManager.sceneCount).Select(SceneManager.GetSceneAt).Where(s => s.isDirty).Select(s => s.name).ToList();
+            _statusLabel.text = $"{SceneManager.sceneCount} scene(s), {_gameObjectCount} GameObjects (saved files)" +
+                (dirty.Count > 0 ? $" — unsaved changes in {string.Join(", ", dirty)} are not shown until saved" : "");
         }
 
         private static VisualElement BuildTreeRow()
@@ -180,7 +203,10 @@ namespace UnityGitTool
         private static void BindTreeRow(VisualElement element, SceneYamlNode node)
         {
             ((Image)element[0]).image = UnityGitToolWindow.GetIcon(node.Icon);
-            ((Label)element[1]).text = node.Label;
+            var label = (Label)element[1];
+            label.text = node.Label;
+            // Like the Hierarchy: the active scene's name in bold.
+            label.EnableInClassList("gt-row-header-label", node.GameObject == null && node.ScenePath == SceneManager.GetActiveScene().path);
         }
 
         // -------------------------------------------------------------------- selection --
@@ -188,17 +214,18 @@ namespace UnityGitTool
         /// <summary>The (targetObjectId, targetPrefabId) pair Unity's GlobalObjectId gives the loaded
         /// object: the scene fileID for a plain GameObject; for an object inside a prefab instance, its
         /// fileID in the source prefab (nested ones combined), with the scene instance's fileID as prefab id.</summary>
-        private static (ulong, ulong) ObjectKey(SceneYamlNode node) =>
-            ((ulong)node.GameObject.GlobalObjectId, (ulong)node.GameObject.GlobalPrefabId);
+        private static (string, ulong, ulong) ObjectKey(SceneYamlNode node) => node.GameObject == null
+            ? (node.SceneGuid ?? node.Label, 0UL, 0UL)
+            : (node.SceneGuid, (ulong)node.GameObject.GlobalObjectId, (ulong)node.GameObject.GlobalPrefabId);
 
         private void OnTreeSelectionChanged(IEnumerable<object> selection)
         {
             var node = selection.FirstOrDefault() as SceneYamlNode;
             ShowRows(node);
-            if (_syncingSelection || node == null || string.IsNullOrEmpty(_sceneGuid)) return;
+            if (_syncingSelection || node?.GameObject == null || string.IsNullOrEmpty(node.SceneGuid)) return;
 
-            var (objectId, prefabId) = ObjectKey(node);
-            if (!GlobalObjectId.TryParse($"GlobalObjectId_V1-2-{_sceneGuid}-{objectId}-{prefabId}", out var globalId)) return;
+            var (sceneGuid, objectId, prefabId) = ObjectKey(node);
+            if (!GlobalObjectId.TryParse($"GlobalObjectId_V1-2-{sceneGuid}-{objectId}-{prefabId}", out var globalId)) return;
             var target = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(globalId);
             if (target == null) return; // only in the saved file (deleted since), or the scene isn't loaded
 
@@ -211,10 +238,11 @@ namespace UnityGitTool
         {
             if (_syncingSelection || !_treeBuilt) return;
             var go = Selection.activeGameObject;
-            if (go == null || go.scene.path != _scenePath) return; // a prefab asset, another scene
+            if (go == null || !go.scene.IsValid()) return; // a prefab asset
 
             var globalId = GlobalObjectId.GetGlobalObjectIdSlow(go);
-            if (!_treeIdByObject.TryGetValue((globalId.targetObjectId, globalId.targetPrefabId), out var treeId)) return; // not in the saved file yet, or inside a prefab without an override
+            var key = (globalId.assetGUID.ToString(), globalId.targetObjectId, globalId.targetPrefabId);
+            if (!_treeIdByObject.TryGetValue(key, out var treeId)) return; // not in the saved file yet
 
             _syncingSelection = true;
             try { _tree.SetSelectionById(treeId); }
@@ -255,7 +283,7 @@ namespace UnityGitTool
 
         private void ShowRows(SceneYamlNode node)
         {
-            _rows = node != null ? SceneYamlTree.BuildRows(node, _hierarchy) : new List<SceneYamlRow>();
+            _rows = node != null ? SceneYamlTree.BuildRows(node) : new List<SceneYamlRow>();
             if (_table == null) return;
             _table.itemsSource = _rows;
             _table.Rebuild();
