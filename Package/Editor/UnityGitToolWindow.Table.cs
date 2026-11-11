@@ -238,6 +238,8 @@ namespace UnityGitTool
                     var fieldSlot = element[side == ColumnSide.B ? 1 : 0];
                     fieldSlot.Clear(); // cells are recycled across rows — previous row's field type may differ
                     element.EnableInClassList("gt-row-header", data.IsHeader);
+                    element.EnableInClassList("gt-marked-rollback", side == ColumnSide.B &&
+                        (data.IsHeader ? IsHeaderMarkedForRollback(data) : data.MarkedForRollback));
 
                     if (data.IsHeader)
                     {
@@ -340,29 +342,15 @@ namespace UnityGitTool
                             actionButton.userData = onTake;
                             actionButton.clicked += onTake;
                         }
-                        else if (side == ColumnSide.B && isWorkingTree && data.OwnerHeaderRow?.HeaderStateB != MockHeaderState.Deleted)
+                        else if (side == ColumnSide.B && isWorkingTree && CanRollbackField(data))
                         {
-                            // Outside Merge mode there's no Result to take a value into — but B being
-                            // Working Tree means this field is a real, uncommitted, writable change, so
-                            // the one action still worth offering is discarding it: roll this one field
-                            // back to A's value, written straight to the file on disk (see
-                            // UnityGitToolWindow.Apply.cs's RollbackField). Icon rather than the
-                            // text arrow — this isn't "take a side into a result", it's "undo". Gated on
-                            // the owner NOT being wholly missing from the working tree (HeaderStateB ==
-                            // Deleted) — a field on a component/GameObject that doesn't exist there at
-                            // all has nothing real to roll back; that's the header's own bulk Rollback
-                            // button instead (see BindHeaderValueCell / RollbackHeader), which restores
-                            // the whole missing document rather than pretending one field can stand in
-                            // for it.
-                            actionButton.style.display = DisplayStyle.Flex;
-                            actionButton.text = "";
-                            actionButton.Clear();
-                            actionButton.Add(new Image { image = GetIcon("Refresh"), scaleMode = ScaleMode.ScaleToFit });
-                            actionButton.tooltip = $"Rollback to {_revisionA}'s value (discards this uncommitted change)";
-                            actionButton.clicked -= actionButton.userData as System.Action;
-                            System.Action onRollback = () => RollbackField(data);
-                            actionButton.userData = onRollback;
-                            actionButton.clicked += onRollback;
+                            // Outside Merge mode the one action on a working-tree change is discarding
+                            // it: mark it, the toolbar's Rollback writes it (see .Rollback.cs). A field
+                            // whose owner is missing from the working tree is restored whole from its
+                            // header instead (CanRollbackField).
+                            BindRollbackToggle(actionButton, data.MarkedForRollback,
+                                data.MarkedForRollback ? "Unmark: keep this uncommitted change" : $"Mark for rollback to {_revisionA}'s value",
+                                () => ToggleFieldRollback(data));
                         }
                     }
                 },
@@ -436,28 +424,32 @@ namespace UnityGitTool
                 return;
             }
 
-            // Outside Merge mode: a bulk Rollback button on B, same idea as a single field's (see
-            // BuildColumn's plain-value branch) but for this whole component/GameObject at once — the
-            // header equivalent of "discard every uncommitted change under here". Two very different
-            // operations share this one button depending on whether B still has the object at all:
-            // Modified rolls back every field row under this header (see RollbackHeader); Deleted
-            // restores the whole missing document (and, for a component, its owning GameObject too if
-            // that's ALSO missing) rather than pretending there are fields to splice into something
-            // that doesn't exist in the working tree yet.
-            var isWorkingTree = side == ColumnSide.A ? _revisionA == WorkingTree : _revisionB == WorkingTree;
-            if (side != ColumnSide.B || !isWorkingTree || state == MockHeaderState.Added) return;
+            // Outside Merge mode: the bulk rollback mark on B (see ToggleHeaderRollback) — every field
+            // under a Modified header, or the whole document for one missing from the working tree.
+            if (side != ColumnSide.B || !CanRollback || state == MockHeaderState.Added) return;
+            if (state != MockHeaderState.Deleted && RollbackFieldsUnder(data).Count == 0) return;
 
-            actionButton.style.display = DisplayStyle.Flex;
-            actionButton.text = ""; // this same recycled button may have last shown a merge-mode text arrow
-            actionButton.Clear();
-            actionButton.Add(new Image { image = GetIcon("Refresh"), scaleMode = ScaleMode.ScaleToFit });
-            actionButton.tooltip = state == MockHeaderState.Deleted
-                ? $"Restore this {what} from {_revisionA} (it doesn't exist in the working tree)"
-                : $"Rollback every field in this {what} to {_revisionA}'s value";
-            actionButton.clicked -= actionButton.userData as System.Action;
-            System.Action onRollback = () => RollbackHeader(data);
-            actionButton.userData = onRollback;
-            actionButton.clicked += onRollback;
+            var marked = IsHeaderMarkedForRollback(data);
+            BindRollbackToggle(actionButton, marked,
+                marked ? $"Unmark this {what}"
+                    : state == MockHeaderState.Deleted
+                        ? $"Mark this {what} to be restored from {_revisionA} (it doesn't exist in the working tree)"
+                        : $"Mark every field in this {what} for rollback to {_revisionA}'s value",
+                () => ToggleHeaderRollback(data));
+        }
+
+        /// <summary>The recycled action button as a rollback mark toggle: highlighted while marked.</summary>
+        private static void BindRollbackToggle(Button button, bool marked, string tooltip, System.Action onToggle)
+        {
+            button.style.display = DisplayStyle.Flex;
+            button.text = ""; // this same recycled button may have last shown a merge-mode text arrow
+            button.Clear();
+            button.Add(new Image { image = GetIcon("Refresh"), scaleMode = ScaleMode.ScaleToFit });
+            button.EnableInClassList("gt-toggle-chip-active", marked);
+            button.tooltip = tooltip;
+            button.clicked -= button.userData as System.Action;
+            button.userData = onToggle;
+            button.clicked += onToggle;
         }
 
         /// <summary>Status color for a value cell's text: green when this side introduces the field

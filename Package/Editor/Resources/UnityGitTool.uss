@@ -151,6 +151,33 @@
     color: rgb(200, 90, 90);
 }
 
+/* Pending rollback marks under a Files tree node (see UnityGitToolWindow.Rollback.cs). */
+.gt-rollback-count {
+    flex-direction: row;
+    align-items: center;
+    flex-shrink: 0;
+    margin-left: 6px;
+    padding: 0 4px;
+    border-radius: 3px;
+    background-color: rgba(80, 140, 200, 0.35);
+}
+
+.gt-rollback-count > Image {
+    width: 12px;
+    height: 12px;
+    margin-right: 2px;
+}
+
+.gt-rollback-count > Label {
+    font-size: 11px;
+    -unity-font-style: bold;
+}
+
+/* B cell of a change marked for rollback: tinted until the toolbar's Rollback writes it. */
+.gt-marked-rollback {
+    background-color: rgba(80, 140, 200, 0.18);
+}
+
 .gt-cell {
     -unity-text-align: middle-left;
     padding: 0 8px;

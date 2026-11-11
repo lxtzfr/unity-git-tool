@@ -16,6 +16,9 @@ namespace UnityGitTool
     {
         private TreeView _tree;
         private TreeView _resultTree;
+        private List<TreeViewItemData<MockNode>> _roots = new();
+        // Never reset: RefreshFiles rebuilds one file while the others keep their ids.
+        private int _nextNodeId;
         // Re-entrancy guard for SyncTreeSelection: setting one tree's selection from the other's
         // selectionChanged handler would otherwise fire that tree's own selectionChanged right back,
         // ping-ponging forever.
@@ -104,49 +107,69 @@ namespace UnityGitTool
             finally { _syncingTreeSelection = false; }
         }
 
-        /// <summary>Rebuilds the left tree. When A is Working Tree (the merge/rebase-resolution case —
-        /// see "Auto-config merge branches"), the file set is exactly git status's: everything that
-        /// differs from HEAD (<c>GetChangedFiles(A, HEAD)</c> — matches its "modified"/"added"/"deleted"
-        /// entries) union <see cref="GitFileReader.GetConflictedFiles"/> (matches its "Unmerged paths").
-        /// B (usually a conflict ref like REBASE_HEAD) is deliberately NOT used to pick which files
-        /// appear — it's an old, already-superseded commit, so diffing against it directly pulls in
-        /// files that only differ because of that, not because of anything the current operation
-        /// touched; B is still used below to read each listed file's own "Theirs" content. Otherwise
-        /// (comparing two arbitrary revisions, nothing to do with a live conflict) the file set is
-        /// just <c>GetChangedFiles(A, B)</c> as you'd expect from a plain diff. Filtered to scene/prefab
-        /// files either way — the only ones this tool knows how to open. <see cref="MockNode.HasConflict"/>
-        /// (the warning icon), not list membership, is what then distinguishes a real conflict from a
-        /// change that auto-merged cleanly, same as Rider's Commit/Changes view (as opposed to its
-        /// separate conflicts-only "Resolve Conflicts" dialog, which this tool doesn't have —
-        /// everything lives in one list).</summary>
+        /// <summary>Rebuilds every file's nodes (revision change, Refresh), keeping the selection,
+        /// expansion and scroll.</summary>
         private void RefreshTree()
         {
+            var state = CaptureTreeState();
             MockDataSource.RowsByNodeId.Clear();
             MockDataSource.OwnRowsByNodeId.Clear();
             MockDataSource.GameObjectNodesByNodeId.Clear();
-            _currentRows = new List<MockRow>();
-            _selectedNode = null;
 
-            var nextId = 0;
-            int NextId() => nextId++;
-
-            // Which of the changed files git itself still considers unresolved — see
-            // UnityYamlDiffBuilder's class header for why a per-field IsConflict needs this, not just
-            // "both sides have it and it differs".
             var conflictedPaths = new HashSet<string>(GitFileReader.GetConflictedFiles());
+            _roots = ListChangedFiles(conflictedPaths).Values
+                .Select(file => BuildFileItem(file, conflictedPaths))
+                .Where(item => item.HasValue)
+                .Select(item => item.Value)
+                .ToList();
+            ApplyRoots(state);
+        }
 
+        /// <summary>Rebuilds only <paramref name="paths"/>' nodes (after a write to them), keeping every
+        /// other file's nodes, rows and marks, and the selection / expansion / scroll. A path git no
+        /// longer lists (fully rolled back) leaves the tree.</summary>
+        private void RefreshFiles(IEnumerable<string> paths)
+        {
+            var state = CaptureTreeState();
+            var conflictedPaths = new HashSet<string>(GitFileReader.GetConflictedFiles());
+            var filesByPath = ListChangedFiles(conflictedPaths);
+
+            var refreshed = paths.Distinct().ToList();
+            foreach (var path in refreshed)
+            {
+                var index = _roots.FindIndex(root => root.data.FilePath == path);
+                if (index >= 0) ForgetNodes(_roots[index]);
+
+                var item = filesByPath.TryGetValue(path, out var file) ? BuildFileItem(file, conflictedPaths) : null;
+                if (index >= 0 && item.HasValue) _roots[index] = item.Value;
+                else if (index >= 0) _roots.RemoveAt(index);
+                else if (item.HasValue) _roots.Add(item.Value);
+            }
+            Debug.Log($"[UnityGitTool] Refreshed {string.Join(", ", refreshed)}");
+            ApplyRoots(state);
+        }
+
+        private static void ForgetNodes(TreeViewItemData<MockNode> item)
+        {
+            MockDataSource.RowsByNodeId.Remove(item.id);
+            MockDataSource.OwnRowsByNodeId.Remove(item.id);
+            MockDataSource.GameObjectNodesByNodeId.Remove(item.id);
+            foreach (var child in item.children) ForgetNodes(child);
+        }
+
+        /// <summary>The file set: when A is Working Tree (the merge/rebase-resolution case), exactly git
+        /// status's — everything that differs from HEAD plus the conflicted files. B (usually a conflict
+        /// ref like REBASE_HEAD) is an old, already-superseded commit: diffing against it pulls in files
+        /// that only differ because of that; it is still read for each file's "Theirs" content.
+        /// Otherwise a plain A vs B diff. <see cref="MockNode.HasConflict"/>, not membership, marks a
+        /// real conflict.</summary>
+        private Dictionary<string, GitChangedFile> ListChangedFiles(HashSet<string> conflictedPaths)
+        {
             var filesByPath = new Dictionary<string, GitChangedFile>();
             if (_revisionA == WorkingTree)
             {
-                // A vs B (usually a conflict ref like REBASE_HEAD) is NOT the right file-listing source
-                // here: it also picks up files that only differ from that ref because it's an old,
-                // already-superseded commit — noise `git status` never shows. HEAD (what's actually
-                // changed by the current operation) plus the conflicted set is exactly git status's
-                // file list; B is still used below for each file's own content, just not to pick which
-                // files appear.
                 foreach (var file in GitFileReader.GetChangedFiles(_revisionA, "HEAD"))
                     filesByPath[file.Path] = file;
-
                 foreach (var path in conflictedPaths)
                     if (!filesByPath.ContainsKey(path)) filesByPath[path] = new GitChangedFile(path, null, GitChangeStatus.Modified);
             }
@@ -155,60 +178,111 @@ namespace UnityGitTool
                 foreach (var file in GitFileReader.GetChangedFiles(_revisionA, _revisionB))
                     filesByPath[file.Path] = file;
             }
+            return filesByPath;
+        }
 
-            var roots = new List<TreeViewItemData<MockNode>>();
-            foreach (var file in filesByPath.Values)
+        /// <summary>One file's subtree, or null for a file this tool can't open (not a scene / prefab).</summary>
+        private TreeViewItemData<MockNode>? BuildFileItem(GitChangedFile file, HashSet<string> conflictedPaths)
+        {
+            var extension = Path.GetExtension(file.Path);
+            MockNodeKind kind;
+            if (extension == ".unity") kind = MockNodeKind.SceneFile;
+            else if (extension == ".prefab") kind = MockNodeKind.PrefabFile;
+            else return null;
+
+            var badge = file.Status switch
             {
-                MockNodeKind kind;
-                var extension = Path.GetExtension(file.Path);
-                if (extension == ".unity") kind = MockNodeKind.SceneFile;
-                else if (extension == ".prefab") kind = MockNodeKind.PrefabFile;
-                else continue;
+                GitChangeStatus.Added => MockBadge.Added,
+                GitChangeStatus.Deleted => MockBadge.Removed,
+                _ => MockBadge.Modified,
+            };
+            var fileIsConflicted = conflictedPaths.Contains(file.Path);
 
-                var badge = file.Status switch
+            // During conflict resolution a conflicted file keeps B = the conflict ref (real "Theirs").
+            // Any other modified file is already settled in the working tree, often identical to that
+            // ref, so it is compared to HEAD instead — there B is the OLDER side, which bIsOlderBaseline
+            // tells BuildFileNode so a GameObject this operation added doesn't read as "Removed".
+            var bIsOlderBaseline = _revisionA == WorkingTree && !fileIsConflicted;
+            var contentRevisionB = bIsOlderBaseline ? "HEAD" : _revisionB;
+
+            // A renamed file only exists at its OldPath on the A side.
+            var contentA = GitFileReader.ReadFileAtRevision(_revisionA, file.OldPath ?? file.Path);
+            var contentB = GitFileReader.ReadFileAtRevision(contentRevisionB, file.Path);
+
+            return UnityYamlDiffBuilder.BuildFileNode(
+                () => _nextNodeId++, MockDataSource.RowsByNodeId, MockDataSource.OwnRowsByNodeId, MockDataSource.GameObjectNodesByNodeId,
+                Path.GetFileName(file.Path), file.Path, kind, badge, contentA, contentB, fileIsConflicted, bIsOlderBaseline);
+        }
+
+        /// <summary>Node ids are regenerated on every build, so the view state is carried over by a key
+        /// stable across builds: each node's chain of (file path | FileId + label) from the root.</summary>
+        private sealed class TreeState
+        {
+            public readonly HashSet<string> Expanded = new();
+            public readonly HashSet<string> Known = new();
+            public string Selected;
+            public Vector2 Scroll;
+        }
+
+        private static string NodeKey(string parentKey, MockNode node) =>
+            parentKey + "/" + (node.Kind is MockNodeKind.SceneFile or MockNodeKind.PrefabFile ? node.FilePath : $"{node.FileId}:{node.Label}");
+
+        private TreeState CaptureTreeState()
+        {
+            var state = new TreeState();
+            if (_tree == null) return state;
+            void Walk(IEnumerable<TreeViewItemData<MockNode>> items, string parentKey)
+            {
+                foreach (var item in items)
                 {
-                    GitChangeStatus.Added => MockBadge.Added,
-                    GitChangeStatus.Deleted => MockBadge.Removed,
-                    _ => MockBadge.Modified,
-                };
-                var fileIsConflicted = conflictedPaths.Contains(file.Path);
-
-                // A/B during conflict resolution: for a genuinely conflicted file, B stays the conflict
-                // ref (REBASE_HEAD etc.) so its content is real "Theirs" to pick against. For any other
-                // "Modified" file, working tree is already whatever this operation settled it to — often
-                // byte-identical to that same conflict ref, since it's an old, already-superseded commit
-                // (see RefreshTree's own doc comment) — so there's nothing left to compare there. HEAD
-                // (what's actually different because of this operation) is what shows something. In
-                // this fallback, unlike every other A/B pairing in this tool, B (HEAD) is the OLDER side
-                // and A (Working Tree) the newer one — bIsOlderBaseline tells BuildFileNode to flip its
-                // Added/Removed reading accordingly (see its doc comment), or a GameObject only this
-                // operation added would read backwards as "Removed".
-                var bIsOlderBaseline = _revisionA == WorkingTree && !fileIsConflicted;
-                var contentRevisionB = bIsOlderBaseline ? "HEAD" : _revisionB;
-
-                // A renamed file's old path only exists on the A side — GetChangedFiles already
-                // reports the new path for B, so read A back at its OldPath when there is one.
-                var contentA = GitFileReader.ReadFileAtRevision(_revisionA, file.OldPath ?? file.Path);
-                var contentB = GitFileReader.ReadFileAtRevision(contentRevisionB, file.Path);
-
-                roots.Add(UnityYamlDiffBuilder.BuildFileNode(
-                    NextId, MockDataSource.RowsByNodeId, MockDataSource.OwnRowsByNodeId, MockDataSource.GameObjectNodesByNodeId,
-                    Path.GetFileName(file.Path), file.Path, kind, badge, contentA, contentB, fileIsConflicted, bIsOlderBaseline));
+                    var key = NodeKey(parentKey, item.data);
+                    state.Known.Add(key);
+                    if (_tree.IsExpanded(item.id)) state.Expanded.Add(key);
+                    if (_selectedNode?.Id == item.id) state.Selected = key;
+                    Walk(item.children, key);
+                }
             }
+            Walk(_roots, "");
+            state.Scroll = _tree.Q<ScrollView>()?.scrollOffset ?? Vector2.zero;
+            return state;
+        }
 
-            // Same `roots` data bound to both trees — see the class header for why: they share ids,
-            // so selection syncs by id and a build-once diff isn't duplicated per tree. _resultTree is
-            // null outside Merge mode (see UnityGitToolWindow.cs's CreateGUI) — nothing to preview.
-            _tree.SetRootItems(roots);
-            _tree.Rebuild();
-            _tree.ExpandRootItems();
-            if (_resultTree != null)
+        /// <summary>Binds <see cref="_roots"/> to both trees (they share ids, so selection syncs by id;
+        /// _resultTree is null outside Merge mode) and restores <paramref name="state"/>. A file the
+        /// state doesn't know (first build, newly listed) opens expanded.</summary>
+        private void ApplyRoots(TreeState state)
+        {
+            _currentRows = new List<MockRow>();
+            _selectedNode = null;
+
+            var expandIds = new List<int>();
+            int? selectId = null;
+            void Walk(IEnumerable<TreeViewItemData<MockNode>> items, string parentKey, bool isRoot)
             {
-                _resultTree.SetRootItems(roots);
-                _resultTree.Rebuild();
-                _resultTree.ExpandRootItems();
+                foreach (var item in items)
+                {
+                    var key = NodeKey(parentKey, item.data);
+                    if (state.Expanded.Contains(key) || (isRoot && !state.Known.Contains(key))) expandIds.Add(item.id);
+                    if (key == state.Selected) selectId = item.id;
+                    Walk(item.children, key, false);
+                }
+            }
+            Walk(_roots, "", true);
+
+            foreach (var tree in new[] { _tree, _resultTree })
+            {
+                if (tree == null) continue;
+                tree.SetRootItems(_roots);
+                tree.Rebuild();
+                foreach (var id in expandIds) tree.ExpandItem(id, false, false);
+                tree.RefreshItems();
             }
             RefreshTable();
+
+            if (selectId.HasValue) _tree.SetSelectionById(selectId.Value); // refills the table through OnTreeSelectionChanged
+            var scrollView = _tree.Q<ScrollView>();
+            scrollView?.schedule.Execute(() => scrollView.scrollOffset = state.Scroll);
+            UpdatePendingRollbacks();
         }
 
         private static VisualElement BuildTreeRow()
@@ -234,6 +308,12 @@ namespace UnityGitTool
             badgeLabel.AddToClassList("gt-chip");
             badgeLabel.AddToClassList("gt-icon-trailing");
             row.Add(badgeLabel);
+
+            var rollbackCount = new VisualElement { tooltip = "Marked for rollback, not applied yet" };
+            rollbackCount.AddToClassList("gt-rollback-count");
+            rollbackCount.Add(new Image { image = GetIcon("Refresh"), scaleMode = ScaleMode.ScaleToFit });
+            rollbackCount.Add(new Label());
+            row.Add(rollbackCount);
             return row;
         }
 
@@ -255,6 +335,11 @@ namespace UnityGitTool
             var label = (Label)element[1];
             var conflictIcon = (Image)element[2];
             var badgeLabel = (Label)element[3];
+            var rollbackCount = element[4];
+
+            var pending = isResultTree ? 0 : CountRollbacks(node.Id);
+            rollbackCount.style.display = pending > 0 ? DisplayStyle.Flex : DisplayStyle.None;
+            rollbackCount.Q<Label>().text = pending.ToString();
 
             typeIcon.image = GetIcon(node.Kind switch
             {

@@ -6,7 +6,7 @@ namespace UnityGitTool
     /// <summary>
     /// Applies changes back onto <paramref name="baseText"/> (the file actually being patched — always
     /// the working tree, whether that's a real merge resolution or a diff-mode rollback, see
-    /// <see cref="UnityGitToolWindow.ApplyResolution"/>/<see cref="UnityGitToolWindow.RollbackField"/>).
+    /// <see cref="UnityGitToolWindow.ApplyResolution"/>/<see cref="UnityGitToolWindow.ApplyRollbacks"/>).
     /// Three kinds of edit, all expressed as the same "remove this line range, insert these lines
     /// instead" <see cref="LineEdit"/> so they can be collected up front and applied in one
     /// back-to-front pass (removing/inserting earlier in the file would otherwise invalidate line
@@ -521,7 +521,7 @@ namespace UnityGitTool
             var originalMissing = new HashSet<long>(missing);
 
             // A GameObject pulled in only by this closure — never explicitly requested, so the caller
-            // (RollbackHeader) never listed its own components the way it does for a top-level restore
+            // (ApplyRollbacks) never listed its own components the way it does for a top-level restore
             // click — needs its own real content cascaded WITH it: its own components, and its own real
             // child GameObjects, recursively. Otherwise its copied m_Component/m_Children list would
             // just dangle one level deeper, the exact failure this whole method exists to prevent —

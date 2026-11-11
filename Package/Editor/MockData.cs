@@ -99,6 +99,11 @@ namespace UnityGitTool
         /// <see cref="UnityYamlWriter"/>). Only ever meaningful on a header row.</summary>
         public bool MarkedForDeletion;
 
+        /// <summary>Diff mode, B = Working Tree: queued to go back to A's value on the next "Rollback"
+        /// (see UnityGitToolWindow.Rollback.cs). On a field row, that field; on a component header whose
+        /// component is missing from the working tree, restoring the whole document.</summary>
+        public bool MarkedForRollback;
+
         /// <summary>Set only on the synthetic header row <see cref="UnityGitToolWindow"/>'s table
         /// prepends for whichever GameObject is currently selected (see
         /// UnityGitToolWindow.Tree.cs's OnTreeSelectionChanged) — a "Delete GameObject" click there
@@ -186,6 +191,10 @@ namespace UnityGitTool
         /// with the entry pointing at it from its parent's <c>m_Children</c> (see
         /// <see cref="UnityYamlWriter"/>). Never true on a file node.</summary>
         public bool MarkedForDeletion;
+
+        /// <summary>A GameObject missing from the working tree, queued to be restored from A (with its
+        /// components) on the next "Rollback" — see UnityGitToolWindow.Rollback.cs.</summary>
+        public bool MarkedForRollback;
 
         /// <summary>This GameObject's per-side diff status — see <see cref="MockRow.HeaderStateA"/>/
         /// <see cref="MockRow.HeaderStateB"/> for how it's used; set alongside <see cref="Badge"/> in

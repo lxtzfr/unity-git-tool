@@ -3,7 +3,7 @@ using UnityEngine.UIElements;
 
 namespace UnityGitTool
 {
-    /// <summary>Toolbar: revision pickers (A/B), manual refresh.</summary>
+    /// <summary>Toolbar: revision pickers (A/B), manual refresh, Rollback of the marked changes.</summary>
     public partial class UnityGitToolWindow
     {
         private VisualElement BuildHeader()
@@ -22,19 +22,23 @@ namespace UnityGitTool
             // state.
             var menuA = BuildRevisionMenu(_revisionA, v =>
             {
+                if (!ConfirmPendingRollbacks("Changing revision")) return false;
                 _revisionA = v;
                 UpdateColumnHeaders(_revisionA, _revisionB);
                 RunDiff();
                 RefreshTree();
                 _table.RefreshItems();
+                return true;
             });
             var menuB = BuildRevisionMenu(_revisionB, v =>
             {
+                if (!ConfirmPendingRollbacks("Changing revision")) return false;
                 _revisionB = v;
                 UpdateColumnHeaders(_revisionA, _revisionB);
                 RunDiff();
                 RefreshTree();
                 _table.RefreshItems();
+                return true;
             });
             menuA.AddToClassList("gt-revision-menu-first");
             revisionGroup.Add(menuA);
@@ -49,6 +53,7 @@ namespace UnityGitTool
             // dual tree, Result column or not — see CreateGUI) needs rebuilding, not just a data refresh.
             var refresh = new Button(() =>
             {
+                if (!ConfirmPendingRollbacks("Refresh")) return;
                 if (DetectAndApplyConflictState())
                 {
                     rootVisualElement.Clear();
@@ -67,6 +72,7 @@ namespace UnityGitTool
             var spacer = new VisualElement();
             spacer.AddToClassList("gt-flex-spacer");
             toolbar.Add(spacer);
+            toolbar.Add(BuildRollbackButton());
             return toolbar;
         }
 
@@ -76,15 +82,14 @@ namespace UnityGitTool
         /// The submenu label carries the commit's subject for readability, but the value passed to
         /// <paramref name="onChange"/> (and shown once selected) is always a real git revision —
         /// the branch name or the commit hash — never that display text.</summary>
-        private static ToolbarMenu BuildRevisionMenu(string initialValue, System.Action<string> onChange)
+        private static ToolbarMenu BuildRevisionMenu(string initialValue, System.Func<string, bool> onChange)
         {
             var menu = new ToolbarMenu { text = initialValue };
             menu.AddToClassList("gt-revision-menu");
 
             void Select(string value)
             {
-                menu.text = value;
-                onChange(value);
+                if (onChange(value)) menu.text = value; // false: the change was cancelled
             }
 
             menu.menu.AppendAction("HEAD", _ => Select("HEAD"));
