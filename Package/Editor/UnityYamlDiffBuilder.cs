@@ -437,8 +437,9 @@ namespace UnityGitTool
 
         /// <summary>One changed PrefabInstance's node: its removed/added component &amp; GameObject lists
         /// as its own list-valued rows (see <see cref="AddListDiffRow"/>/<see cref="AddAddedListDiffRow"/>),
-        /// and one <see cref="MockNodeKind.PrefabInstanceObject"/> child per source-prefab GameObject its
-        /// property overrides (<c>m_Modification.m_Modifications</c>) touch, holding those rows. No scene
+        /// and one <see cref="MockNodeKind.PrefabInstanceObject"/> node per source-prefab GameObject its
+        /// property overrides (<c>m_Modification.m_Modifications</c>) touch, holding those rows, nested
+        /// under its ancestors in the source prefab (see <see cref="BuildPrefabObjectTree"/>). No scene
         /// GameObject is ever parented under a PrefabInstance id (see <see cref="BuildFileNode"/>), but
         /// <paramref name="childrenOf"/> is still walked defensively, same shape as <see cref="BuildGameObjectSubtree"/>.</summary>
         private static TreeViewItemData<MockNode> BuildPrefabInstanceSubtree(
@@ -471,27 +472,11 @@ namespace UnityGitTool
                 ? (MockHeaderState.None, MockHeaderState.None)
                 : ResolveHeaderStates(instanceA == null, instanceB == null, bIsOlderBaseline);
 
-            // The overridden objects first, as leaves named after the object itself: the instance node
-            // alone only names the prefab, not which of its (possibly deeply nested) objects changed.
-            var objectItems = rowsByObject.Select(group =>
-            {
-                var objectNodeId = nextId();
-                ownRowsByNodeId[objectNodeId] = group.Rows;
-                rowsByNodeId[objectNodeId] = group.Rows;
-                gameObjectNodesByNodeId[objectNodeId] = new List<MockNode>();
-                return new TreeViewItemData<MockNode>(objectNodeId, new MockNode
-                {
-                    Id = objectNodeId,
-                    Label = group.Label,
-                    Kind = MockNodeKind.PrefabInstanceObject,
-                    FilePath = filePath,
-                    FileId = id,
-                    Badge = badge,
-                    HeaderStateA = headerStateA,
-                    HeaderStateB = headerStateB,
-                    HasConflict = group.Rows.Exists(r => r.IsConflict),
-                });
-            }).ToList();
+            // The overridden objects first, nested under their parents inside the source prefab: the
+            // instance node alone only names the prefab, and a flat list of leaves loses which branch
+            // each one sits in (several "Surface" objects under different keys read identical).
+            var objectItems = BuildPrefabObjectTree(rowsByObject).Select(o =>
+                BuildPrefabObjectItem(o, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, filePath, id, badge, headerStateA, headerStateB)).ToList();
             childItems.InsertRange(0, objectItems);
 
             var label = ResolvePrefabInstanceName(instance, sourceGuid) ?? "Prefab Instance";
@@ -518,6 +503,84 @@ namespace UnityGitTool
                 HasConflict = ownRows.Exists(r => r.IsConflict) || childItems.Any(c => c.data.HasConflict),
             };
             return new TreeViewItemData<MockNode>(nodeId, node, childItems);
+        }
+
+        /// <summary>A source-prefab GameObject in the instance's subtree: <see cref="Rows"/> is null for a
+        /// passthrough ancestor that only exists so an overridden descendant nests under it.</summary>
+        private sealed class PrefabObjectNode
+        {
+            public UnityEngine.GameObject Owner;
+            public string Label;
+            public List<MockRow> Rows;
+            public readonly List<PrefabObjectNode> Children = new();
+        }
+
+        /// <summary>Hangs each override group under its owner's ancestor chain in the source prefab, up to
+        /// (not including) the prefab root, which the instance node itself stands for.</summary>
+        private static List<PrefabObjectNode> BuildPrefabObjectTree(List<(string Label, UnityEngine.GameObject Owner, List<MockRow> Rows)> rowsByObject)
+        {
+            var roots = new List<PrefabObjectNode>();
+            var byOwner = new Dictionary<UnityEngine.GameObject, PrefabObjectNode>();
+
+            PrefabObjectNode GetOrAdd(UnityEngine.GameObject go)
+            {
+                if (byOwner.TryGetValue(go, out var existing)) return existing;
+                var node = byOwner[go] = new PrefabObjectNode { Owner = go, Label = go.name };
+                var parent = go.transform.parent;
+                (parent != null && parent.parent != null ? GetOrAdd(parent.gameObject).Children : roots).Add(node);
+                return node;
+            }
+
+            foreach (var group in rowsByObject)
+            {
+                if (group.Owner == null) { roots.Add(new PrefabObjectNode { Label = group.Label, Rows = group.Rows }); continue; }
+                var node = GetOrAdd(group.Owner);
+                node.Rows = group.Rows;
+            }
+
+            void SortBySibling(List<PrefabObjectNode> nodes)
+            {
+                nodes.Sort((a, b) => (a.Owner != null ? a.Owner.transform.GetSiblingIndex() : int.MaxValue)
+                    .CompareTo(b.Owner != null ? b.Owner.transform.GetSiblingIndex() : int.MaxValue));
+                foreach (var n in nodes) SortBySibling(n.Children);
+            }
+            SortBySibling(roots);
+            return roots;
+        }
+
+        private static TreeViewItemData<MockNode> BuildPrefabObjectItem(
+            PrefabObjectNode objectNode,
+            Func<int> nextId,
+            Dictionary<int, List<MockRow>> rowsByNodeId,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
+            string filePath,
+            long instanceId,
+            MockBadge badge,
+            MockHeaderState headerStateA,
+            MockHeaderState headerStateB)
+        {
+            var childItems = objectNode.Children.Select(c =>
+                BuildPrefabObjectItem(c, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, filePath, instanceId, badge, headerStateA, headerStateB)).ToList();
+            var ownRows = objectNode.Rows ?? new List<MockRow>();
+            var isPassthrough = objectNode.Rows == null;
+
+            var nodeId = nextId();
+            ownRowsByNodeId[nodeId] = ownRows;
+            rowsByNodeId[nodeId] = ownRows.Concat(childItems.SelectMany(c => rowsByNodeId.GetValueOrDefault(c.id) ?? new List<MockRow>())).ToList();
+            gameObjectNodesByNodeId[nodeId] = new List<MockNode>();
+            return new TreeViewItemData<MockNode>(nodeId, new MockNode
+            {
+                Id = nodeId,
+                Label = objectNode.Label,
+                Kind = MockNodeKind.PrefabInstanceObject,
+                FilePath = filePath,
+                FileId = instanceId,
+                Badge = isPassthrough ? MockBadge.None : badge,
+                HeaderStateA = isPassthrough ? MockHeaderState.None : headerStateA,
+                HeaderStateB = isPassthrough ? MockHeaderState.None : headerStateB,
+                HasConflict = ownRows.Exists(r => r.IsConflict) || childItems.Any(c => c.data.HasConflict),
+            }, childItems);
         }
 
         /// <summary>Cheap "did this PrefabInstance change at all" check, mirroring
@@ -559,10 +622,10 @@ namespace UnityGitTool
             long instanceId, GitYamlDocument instanceA, GitYamlDocument instanceB, string sourceGuid,
             Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB,
             bool fileIsConflicted, bool bIsOlderBaseline,
-            out List<(string Label, List<MockRow> Rows)> rowsByObject)
+            out List<(string Label, UnityEngine.GameObject Owner, List<MockRow> Rows)> rowsByObject)
         {
             var rows = new List<MockRow>();
-            rowsByObject = new List<(string Label, List<MockRow> Rows)>();
+            rowsByObject = new List<(string Label, UnityEngine.GameObject Owner, List<MockRow> Rows)>();
             // A component target groups under its GameObject; an unresolvable target stays on its own.
             var groupIndexByKey = new Dictionary<object, int>();
 
@@ -591,7 +654,7 @@ namespace UnityGitTool
                 {
                     groupIndex = rowsByObject.Count;
                     groupIndexByKey[groupKey] = groupIndex;
-                    rowsByObject.Add((target.OwnerLabel, new List<MockRow>()));
+                    rowsByObject.Add((target.OwnerLabel, target.Owner, new List<MockRow>()));
                 }
                 var targetRows = rowsByObject[groupIndex].Rows;
                 targetRows.Add(new MockRow { IsHeader = true, Property = target.Label, HeaderIcon = target.Icon });
