@@ -97,9 +97,9 @@ namespace UnityGitTool
             // A changed PrefabInstance walks the exact same included/parentOf/childrenOf machinery
             // below as a GameObject — GetParentGameObjectId already resolves either id shape to its
             // real GameObject parent (see ResolvePrefabInstanceParentGameObjectId) — so both id kinds
-            // share one unified tree walk rather than a parallel structure. See
-            // BuildPrefabInstanceSubtree for why a PrefabInstance id is always a LEAF here (nothing in
-            // this file is ever parented under one in turn).
+            // share one unified tree walk rather than a parallel structure. Nothing in this file is ever
+            // parented under a PrefabInstance id in turn (its only children are the overridden-object
+            // nodes BuildPrefabInstanceSubtree adds itself).
             var changedPrefabInstanceIds = byIdA.Values.Concat(byIdB.Values)
                 .Where(d => d.TypeName == "PrefabInstance")
                 .Select(d => d.FileId)
@@ -435,14 +435,12 @@ namespace UnityGitTool
             return rows;
         }
 
-        /// <summary>One changed PrefabInstance's node — its property overrides
-        /// (<c>m_Modification.m_Modifications</c>, grouped by the object each override targets, per
-        /// the TODO), plus its removed/added component &amp; GameObject lists shown as single
-        /// list-valued rows (same idea as any other array field — see <see cref="AddListDiffRow"/>/
-        /// <see cref="AddAddedListDiffRow"/>). Always a LEAF here in practice — see
-        /// <see cref="BuildFileNode"/>'s own comment on why nothing is ever parented under a
-        /// PrefabInstance id — but still walks <paramref name="childrenOf"/> defensively, same shape
-        /// as <see cref="BuildGameObjectSubtree"/>, in case that assumption ever changes.</summary>
+        /// <summary>One changed PrefabInstance's node: its removed/added component &amp; GameObject lists
+        /// as its own list-valued rows (see <see cref="AddListDiffRow"/>/<see cref="AddAddedListDiffRow"/>),
+        /// and one <see cref="MockNodeKind.PrefabInstanceObject"/> child per source-prefab GameObject its
+        /// property overrides (<c>m_Modification.m_Modifications</c>) touch, holding those rows. No scene
+        /// GameObject is ever parented under a PrefabInstance id (see <see cref="BuildFileNode"/>), but
+        /// <paramref name="childrenOf"/> is still walked defensively, same shape as <see cref="BuildGameObjectSubtree"/>.</summary>
         private static TreeViewItemData<MockNode> BuildPrefabInstanceSubtree(
             long id,
             Dictionary<long, List<long>> childrenOf,
@@ -466,14 +464,37 @@ namespace UnityGitTool
                     childItems.Add(BuildNodeSubtree(childId, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath));
 
             var sourceGuid = GetPrefabSourceGuid(instance);
-            var ownRows = BuildPrefabInstanceRows(id, instanceA, instanceB, sourceGuid, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline);
+            var ownRows = BuildPrefabInstanceRows(id, instanceA, instanceB, sourceGuid, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, out var rowsByObject);
 
-            var badge = ResolveBadge(instanceA, instanceB, ownRows.Count > 0, bIsOlderBaseline);
+            var badge = ResolveBadge(instanceA, instanceB, ownRows.Count > 0 || rowsByObject.Count > 0, bIsOlderBaseline);
             var (headerStateA, headerStateB) = badge == MockBadge.None
                 ? (MockHeaderState.None, MockHeaderState.None)
                 : ResolveHeaderStates(instanceA == null, instanceB == null, bIsOlderBaseline);
 
-            var label = DescribeResolvedTarget(ResolvePrefabSourceRootObject(instance)) ?? "Prefab Instance";
+            // The overridden objects first, as leaves named after the object itself: the instance node
+            // alone only names the prefab, not which of its (possibly deeply nested) objects changed.
+            var objectItems = rowsByObject.Select(group =>
+            {
+                var objectNodeId = nextId();
+                ownRowsByNodeId[objectNodeId] = group.Rows;
+                rowsByNodeId[objectNodeId] = group.Rows;
+                gameObjectNodesByNodeId[objectNodeId] = new List<MockNode>();
+                return new TreeViewItemData<MockNode>(objectNodeId, new MockNode
+                {
+                    Id = objectNodeId,
+                    Label = group.Label,
+                    Kind = MockNodeKind.PrefabInstanceObject,
+                    FilePath = filePath,
+                    FileId = id,
+                    Badge = badge,
+                    HeaderStateA = headerStateA,
+                    HeaderStateB = headerStateB,
+                    HasConflict = group.Rows.Exists(r => r.IsConflict),
+                });
+            }).ToList();
+            childItems.InsertRange(0, objectItems);
+
+            var label = ResolvePrefabInstanceName(instance, sourceGuid) ?? "Prefab Instance";
 
             var nodeId = nextId();
             ownRowsByNodeId[nodeId] = ownRows;
@@ -527,18 +548,23 @@ namespace UnityGitTool
             return false;
         }
 
-        /// <summary>Builds every row for one PrefabInstance's node: one header per distinct override
-        /// TARGET (grouping, per the TODO) with its changed property rows underneath, then the
-        /// removed/added list rows. <paramref name="instanceId"/> is used as every modification row's
+        /// <summary>Returns the instance's own rows (the removed/added lists); the property overrides go
+        /// to <paramref name="rowsByObject"/>, one group per overridden GameObject (a component target
+        /// under its GameObject), each with one header per distinct override TARGET and its changed
+        /// property rows underneath. <paramref name="instanceId"/> is used as every modification row's
         /// <see cref="MockRow.FileId"/> — the PrefabInstance document itself, since that's where
         /// <see cref="UnityYamlParser"/>'s <c>m_Modification.*</c> span tracking lives, matching what
         /// <see cref="UnityYamlWriter"/>'s generic <c>(FileId, Key)</c> splice already expects.</summary>
         private static List<MockRow> BuildPrefabInstanceRows(
             long instanceId, GitYamlDocument instanceA, GitYamlDocument instanceB, string sourceGuid,
             Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB,
-            bool fileIsConflicted, bool bIsOlderBaseline)
+            bool fileIsConflicted, bool bIsOlderBaseline,
+            out List<(string Label, List<MockRow> Rows)> rowsByObject)
         {
             var rows = new List<MockRow>();
+            rowsByObject = new List<(string Label, List<MockRow> Rows)>();
+            // A component target groups under its GameObject; an unresolvable target stays on its own.
+            var groupIndexByKey = new Dictionary<object, int>();
 
             var entriesA = GetModificationEntries(instanceA);
             var entriesB = GetModificationEntries(instanceB);
@@ -561,7 +587,21 @@ namespace UnityGitTool
             {
                 var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
                 var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
-                rows.Add(new MockRow { IsHeader = true, Property = label, HeaderIcon = IconForModificationTarget(resolved) });
+                var owner = resolved switch
+                {
+                    UnityEngine.Component c => c.gameObject,
+                    UnityEngine.GameObject go => go,
+                    _ => null,
+                };
+                object groupKey = owner != null ? owner : targetId;
+                if (!groupIndexByKey.TryGetValue(groupKey, out var groupIndex))
+                {
+                    groupIndex = rowsByObject.Count;
+                    groupIndexByKey[groupKey] = groupIndex;
+                    rowsByObject.Add((owner != null ? owner.name : label, new List<MockRow>()));
+                }
+                var targetRows = rowsByObject[groupIndex].Rows;
+                targetRows.Add(new MockRow { IsHeader = true, Property = label, HeaderIcon = IconForModificationTarget(resolved) });
 
                 foreach (var (propertyPath, entryA, entryB) in entries)
                 {
@@ -571,7 +611,7 @@ namespace UnityGitTool
                     var valueB = hasB ? ResolveModificationValue(entryB, byIdB) : null;
                     var isConflict = fileIsConflicted && hasA && hasB;
 
-                    rows.Add(new MockRow
+                    targetRows.Add(new MockRow
                     {
                         Property = HumanizePropertyPath(propertyPath),
                         FileId = instanceId,
@@ -745,12 +785,22 @@ namespace UnityGitTool
             instance != null && instance.Fields.TryGetValue("m_SourcePrefab", out var raw) && raw is Dictionary<string, object> map &&
             map.TryGetValue("guid", out var g) && g is string guid ? guid : null;
 
-        private static object ResolvePrefabSourceRootObject(GitYamlDocument instance)
+        /// <summary>The name the Hierarchy shows for the instance: its root's <c>m_Name</c> override, else
+        /// the source prefab root's name. Not resolved from <c>m_SourcePrefab</c>'s fileID: that is
+        /// 100100000, the asset's internal prefab object, whose name is empty.</summary>
+        private static string ResolvePrefabInstanceName(GitYamlDocument instance, string sourceGuid)
         {
-            if (instance == null || !instance.Fields.TryGetValue("m_SourcePrefab", out var raw) || raw is not Dictionary<string, object> map ||
-                !map.TryGetValue("guid", out var g) || g is not string guid) return null;
-            var fileId = map.TryGetValue("fileID", out var f) ? f as string : null;
-            return UnityYamlValueConverter.ResolvePrefabSourceObjectName(guid, fileId);
+            if (sourceGuid == null) return null;
+            var path = AssetDatabase.GUIDToAssetPath(sourceGuid);
+            if (string.IsNullOrEmpty(path)) return null;
+            var root = AssetDatabase.LoadAssetAtPath<UnityEngine.GameObject>(path);
+            if (root == null) return System.IO.Path.GetFileNameWithoutExtension(path);
+
+            if (AssetDatabase.TryGetGUIDAndLocalFileIdentifier(root, out _, out long rootFileId) &&
+                GetModificationEntries(instance).TryGetValue($"{rootFileId}::m_Name", out var entry) &&
+                entry.TryGetValue("value", out var value) && value is string overriddenName && overriddenName.Length > 0)
+                return overriddenName;
+            return root.name;
         }
 
         /// <summary>A resolved prefab-source reference (see <see cref="UnityYamlValueConverter.ResolvePrefabSourceObjectName"/>)

@@ -56,7 +56,7 @@ namespace UnityGitTool
             // just because the parent happens to be selected. The table only ever shows a node's
             // own rows — selecting a file, or a GameObject that's only a structural ancestor of
             // the real change, shows nothing until you drill into the actual changed object.
-            if (node.Kind is MockNodeKind.GameObject or MockNodeKind.PrefabInstance && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
+            if (node.Kind is MockNodeKind.GameObject or MockNodeKind.PrefabInstance or MockNodeKind.PrefabInstanceObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
             {
                 // A synthetic header row for the GameObject/PrefabInstance itself — carries "Delete
                 // GameObject" (see Table.cs; a PrefabInstance node has no delete action of its own in

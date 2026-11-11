@@ -142,6 +142,9 @@ namespace UnityGitTool
         /// (<c>m_Modification.m_Modifications</c>/removed-lists), not a real GameObject document of
         /// its own. See <see cref="UnityYamlDiffBuilder.BuildPrefabInstanceSubtree"/>.</summary>
         PrefabInstance,
+        /// <summary>One GameObject of a PrefabInstance's source prefab that its overrides touch, as a
+        /// child of the instance node, so the changed object is named in the tree, not only the instance.</summary>
+        PrefabInstanceObject,
     }
 
     internal enum MockBadge
