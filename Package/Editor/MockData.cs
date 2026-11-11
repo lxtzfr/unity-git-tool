@@ -150,6 +150,9 @@ namespace UnityGitTool
         /// <summary>One GameObject of a PrefabInstance's source prefab that its overrides touch, as a
         /// child of the instance node, so the changed object is named in the tree, not only the instance.</summary>
         PrefabInstanceObject,
+        /// <summary>A document no GameObject owns (embedded Mesh / Material, scene settings), under the
+        /// GameObject using it. See <see cref="UnityYamlDiffBuilder.BuildStandaloneNode"/>.</summary>
+        Standalone,
     }
 
     internal enum MockBadge
@@ -169,6 +172,8 @@ namespace UnityGitTool
         public int Id;
         public string Label;
         public MockNodeKind Kind;
+        /// <summary>Overrides the tree icon <see cref="Kind"/> picks (a standalone node's own type).</summary>
+        public string Icon;
         public MockBadge Badge;
         public bool HasConflict;
 

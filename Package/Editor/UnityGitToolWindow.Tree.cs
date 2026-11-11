@@ -62,7 +62,18 @@ namespace UnityGitTool
             // just because the parent happens to be selected. The table only ever shows a node's
             // own rows — selecting a file, or a GameObject that's only a structural ancestor of
             // the real change, shows nothing until you drill into the actual changed object.
-            if (node.Kind is MockNodeKind.GameObject or MockNodeKind.PrefabInstance or MockNodeKind.PrefabInstanceObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
+            if (node.Kind == MockNodeKind.Standalone && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var standaloneRows))
+            {
+                // Already led by its own header row (built like a component's): no synthetic one.
+                _currentRows = new List<MockRow>(standaloneRows);
+                MockRow header = null;
+                foreach (var row in _currentRows)
+                {
+                    if (row.IsHeader) header = row;
+                    else row.OwnerHeaderRow = header;
+                }
+            }
+            else if (node.Kind is MockNodeKind.GameObject or MockNodeKind.PrefabInstance or MockNodeKind.PrefabInstanceObject && MockDataSource.OwnRowsByNodeId.TryGetValue(node.Id, out var rows))
             {
                 // A synthetic header row for the GameObject/PrefabInstance itself — carries "Delete
                 // GameObject" (see Table.cs; a PrefabInstance node has no delete action of its own in
@@ -354,7 +365,7 @@ namespace UnityGitTool
             rollbackCount.style.display = pending > 0 ? DisplayStyle.Flex : DisplayStyle.None;
             rollbackCount.Q<Label>().text = pending.ToString();
 
-            typeIcon.image = GetIcon(node.Kind switch
+            typeIcon.image = GetIcon(node.Icon ?? node.Kind switch
             {
                 MockNodeKind.SceneFile => "SceneAsset Icon",
                 MockNodeKind.PrefabFile => IsPrefabVariant(node.FilePath) ? "PrefabVariant Icon" : "Prefab Icon",

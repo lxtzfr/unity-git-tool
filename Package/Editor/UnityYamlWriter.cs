@@ -359,7 +359,7 @@ namespace UnityGitTool
 
                 var ownerId = doc.Fields.TryGetValue("m_GameObject", out var raw) && raw is Dictionary<string, object> map &&
                     map.TryGetValue("fileID", out var rawId) && rawId is string s && long.TryParse(s, out var owner) ? owner : 0;
-                if (ownerId == 0) { skipped.Add($"{doc.TypeName} #{id}: couldn't resolve its owning GameObject — not linked back in"); continue; }
+                if (ownerId == 0) continue; // standalone (embedded Mesh / Material, settings): only ever referenced by fileID, no owner list
                 // A stripped owner (Unity's PrefabInstance.m_AddedComponents case — see
                 // IsPrefabBoundDependency) has no m_Component list to append into at all; Unity finds
                 // this component via the owning PrefabInstance's own m_AddedComponents entry instead,

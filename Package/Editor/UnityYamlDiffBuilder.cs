@@ -111,7 +111,17 @@ namespace UnityGitTool
                     return !(b ?? a).Stripped && HasPrefabInstanceChanged(id, byIdA, byIdB);
                 });
 
-            var changedIds = changedGameObjectIds.Concat(changedPrefabInstanceIds);
+            // Documents no GameObject owns (an embedded Mesh / Material, the scene settings): a change
+            // there is invisible otherwise. Each nests under the GameObject whose component uses it.
+            var changedStandaloneIds = byIdA.Values.Concat(byIdB.Values)
+                .Where(IsStandaloneDocument)
+                .Select(d => d.FileId)
+                .Distinct()
+                .Where(id => HasStandaloneChanged(id, byIdA, byIdB))
+                .ToList();
+            var standaloneOwners = FindStandaloneOwners(changedStandaloneIds, byIdA, byIdB);
+
+            var changedIds = changedGameObjectIds.Concat(changedPrefabInstanceIds).Concat(changedStandaloneIds);
 
             // Each changed GameObject's full ancestor chain (via Transform.m_Father), unioned, so it
             // nests under its real parent all the way to the scene root instead of flattening onto the
@@ -125,7 +135,7 @@ namespace UnityGitTool
                 var current = id;
                 while (included.Add(current))
                 {
-                    var parentId = GetParentGameObjectId(current, byIdA, byIdB);
+                    var parentId = standaloneOwners.TryGetValue(current, out var owner) ? owner : GetParentGameObjectId(current, byIdA, byIdB);
                     parentOf[current] = parentId;
                     if (parentId == 0) break;
                     current = parentId;
@@ -303,9 +313,96 @@ namespace UnityGitTool
             string filePath)
         {
             var doc = byIdB.GetValueOrDefault(id) ?? byIdA.GetValueOrDefault(id);
+            if (doc != null && IsStandaloneDocument(doc))
+                return BuildStandaloneNode(id, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath);
             return doc?.TypeName == "PrefabInstance"
                 ? BuildPrefabInstanceSubtree(id, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath)
                 : BuildGameObjectSubtree(id, childrenOf, nextId, rowsByNodeId, ownRowsByNodeId, gameObjectNodesByNodeId, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, filePath);
+        }
+
+        /// <summary>Neither a GameObject, a component (non-zero <c>m_GameObject</c>) nor prefab
+        /// bookkeeping: an embedded Mesh / Material / ScriptableObject, or a scene settings document.</summary>
+        private static bool IsStandaloneDocument(GitYamlDocument doc) =>
+            !doc.Stripped && doc.TypeName is not null and not "GameObject" and not "PrefabInstance" &&
+            !(doc.Fields.GetValueOrDefault("m_GameObject") is Dictionary<string, object> owner && TryGetFileId(owner, out var ownerId) && ownerId != 0);
+
+        private static bool HasStandaloneChanged(long id, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            byIdA.TryGetValue(id, out var a);
+            byIdB.TryGetValue(id, out var b);
+            return a == null || b == null || DiffFields(0, a.Fields, b.Fields, ComponentIgnoredKeys, byIdA, byIdB, false).Count > 0;
+        }
+
+        /// <summary>For each standalone id, the GameObject owning the first component that references it
+        /// (B's side first, as for the hierarchy). One pass over the components, only when needed; a
+        /// stripped owner (prefab-bound) is skipped so the object lands on the file instead.</summary>
+        private static Dictionary<long, long> FindStandaloneOwners(List<long> standaloneIds, Dictionary<long, GitYamlDocument> byIdA, Dictionary<long, GitYamlDocument> byIdB)
+        {
+            var owners = new Dictionary<long, long>();
+            if (standaloneIds.Count == 0) return owners;
+            var wanted = new HashSet<long>(standaloneIds);
+
+            void Collect(object value, long goId)
+            {
+                switch (value)
+                {
+                    case Dictionary<string, object> map when !map.ContainsKey("guid") && TryGetFileId(map, out var refId):
+                        if (wanted.Contains(refId) && !owners.ContainsKey(refId)) owners[refId] = goId;
+                        break;
+                    case List<object> list:
+                        foreach (var item in list) Collect(item, goId);
+                        break;
+                }
+            }
+
+            foreach (var (doc, byId) in byIdB.Values.Select(d => (d, byIdB)).Concat(byIdA.Values.Select(d => (d, byIdA))))
+            {
+                if (doc.Stripped || doc.Fields.GetValueOrDefault("m_GameObject") is not Dictionary<string, object> ownerRef ||
+                    !TryGetFileId(ownerRef, out var goId) || goId == 0) continue;
+                if (!byId.TryGetValue(goId, out var go) || go.Stripped) continue;
+                foreach (var value in doc.Fields.Values) Collect(value, goId);
+            }
+            return owners;
+        }
+
+        /// <summary>A standalone document's node: its fields diffed like a component's (header + rows),
+        /// so a missing one restores whole from its header, like a component.</summary>
+        private static TreeViewItemData<MockNode> BuildStandaloneNode(
+            long id,
+            Func<int> nextId,
+            Dictionary<int, List<MockRow>> rowsByNodeId,
+            Dictionary<int, List<MockRow>> ownRowsByNodeId,
+            Dictionary<int, List<MockNode>> gameObjectNodesByNodeId,
+            Dictionary<long, GitYamlDocument> byIdA,
+            Dictionary<long, GitYamlDocument> byIdB,
+            bool fileIsConflicted,
+            bool bIsOlderBaseline,
+            string filePath)
+        {
+            byIdA.TryGetValue(id, out var docA);
+            byIdB.TryGetValue(id, out var docB);
+            var doc = docB ?? docA;
+            var rows = BuildComponentRows(docA, docB, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, out _);
+            var name = doc.Fields.GetValueOrDefault("m_Name") as string;
+
+            var nodeId = nextId();
+            ownRowsByNodeId[nodeId] = rows;
+            rowsByNodeId[nodeId] = rows;
+            gameObjectNodesByNodeId[nodeId] = new List<MockNode>();
+            var (headerStateA, headerStateB) = ResolveHeaderStates(docA == null, docB == null, bIsOlderBaseline);
+            return new TreeViewItemData<MockNode>(nodeId, new MockNode
+            {
+                Id = nodeId,
+                Label = string.IsNullOrEmpty(name) ? doc.TypeName : $"{name} ({doc.TypeName})",
+                Icon = IconForComponentType(doc.TypeName),
+                Kind = MockNodeKind.Standalone,
+                FilePath = filePath,
+                FileId = id,
+                Badge = ResolveBadge(docA, docB, true, bIsOlderBaseline),
+                HeaderStateA = headerStateA,
+                HeaderStateB = headerStateB,
+                HasConflict = rows.Exists(r => r.IsConflict),
+            });
         }
 
         /// <summary>One GameObject's node, plus every one of its own components' rows flattened onto
@@ -959,6 +1056,8 @@ namespace UnityGitTool
             "Rigidbody" => "Rigidbody Icon",
             "Canvas" => "Canvas Icon",
             "CanvasRenderer" => "CanvasRenderer Icon",
+            "Mesh" => "Mesh Icon",
+            "Material" => "Material Icon",
             "MonoBehaviour" => "cs Script Icon",
             _ => "cs Script Icon",
         };
