@@ -663,13 +663,15 @@ namespace UnityGitTool
                 {
                     var hasA = entryA != null;
                     var hasB = entryB != null;
-                    var valueA = hasA ? ResolveModificationValue(entryA, byIdA) : null;
-                    var valueB = hasB ? ResolveModificationValue(entryB, byIdB) : null;
+                    // A side without the override still has a value: the source prefab's (unless the
+                    // instance itself doesn't exist there). Null would read as "field removed".
+                    var valueA = OverrideDisplayValue(target.Target, propertyPath, entryA, instanceA != null, byIdA);
+                    var valueB = OverrideDisplayValue(target.Target, propertyPath, entryB, instanceB != null, byIdB);
                     var isConflict = fileIsConflicted && hasA && hasB;
 
                     targetRows.Add(new MockRow
                     {
-                        Property = HumanizePropertyPath(propertyPath),
+                        Property = HumanizePropertyPath(propertyPath.EndsWith(ArraySizeSuffix) ? propertyPath[..^ArraySizeSuffix.Length] : propertyPath),
                         FileId = instanceId,
                         Key = $"m_Modification.m_Modifications::{targetId}::{propertyPath}",
                         BIsOlderBaseline = bIsOlderBaseline,
@@ -809,7 +811,7 @@ namespace UnityGitTool
         /// <summary>One override target (a fileID inside the instance's source prefab): its header label
         /// and icon, and the GameObject it belongs to (a component's owner), which overrides are grouped
         /// under. <c>Owner</c> is null when the target doesn't resolve; <c>OwnerLabel</c> is then the raw label.</summary>
-        internal static (string Label, string Icon, UnityEngine.GameObject Owner, string OwnerLabel) DescribeModificationTarget(string sourceGuid, string targetId)
+        internal static (string Label, string Icon, UnityEngine.GameObject Owner, string OwnerLabel, UnityEngine.Object Target) DescribeModificationTarget(string sourceGuid, string targetId)
         {
             var resolved = sourceGuid != null ? UnityYamlValueConverter.ResolvePrefabSourceObjectName(sourceGuid, targetId) : null;
             var label = DescribeResolvedTarget(resolved) ?? $"guid:{sourceGuid ?? "?"} / fileID:{targetId}";
@@ -819,8 +821,60 @@ namespace UnityGitTool
                 UnityEngine.GameObject go => go,
                 _ => null,
             };
-            return (label, IconForModificationTarget(resolved), owner, owner != null ? owner.name : label);
+            return (label, IconForModificationTarget(resolved), owner, owner != null ? owner.name : label, resolved as UnityEngine.Object);
         }
+
+        private const string ArraySizeSuffix = ".Array.size";
+
+        /// <summary>One side of an override row: the override's own value, else (instance present, no
+        /// override) the value inherited from the source prefab. An <c>Array.size</c> row shows the
+        /// elements kept instead of a bare count, so a shrunk array names what it drops. The prefab is
+        /// read as it is on disk, not at the diffed revision.</summary>
+        private static object OverrideDisplayValue(UnityEngine.Object target, string propertyPath, Dictionary<string, object> entry, bool instanceExists, Dictionary<long, GitYamlDocument> byId)
+        {
+            if (!instanceExists) return null;
+            if (!propertyPath.EndsWith(ArraySizeSuffix))
+                return entry != null ? ResolveModificationValue(entry, byId) : ReadPrefabValue(target, propertyPath);
+
+            using var serialized = target != null ? new SerializedObject(target) : null;
+            var array = serialized?.FindProperty(propertyPath[..^ArraySizeSuffix.Length]);
+            if (array == null || !array.isArray)
+                return entry != null ? ResolveModificationValue(entry, byId) : null;
+
+            var size = array.arraySize;
+            if (entry != null && !int.TryParse(entry.GetValueOrDefault("value") as string, out size)) return ResolveModificationValue(entry, byId);
+            return Enumerable.Range(0, size)
+                .Select(i => i < array.arraySize ? SerializedDisplayValue(array.GetArrayElementAtIndex(i)) : "(new element)")
+                .ToArray();
+        }
+
+        private static object ReadPrefabValue(UnityEngine.Object target, string propertyPath)
+        {
+            if (target == null) return null;
+            using var serialized = new SerializedObject(target);
+            var property = serialized.FindProperty(propertyPath);
+            return property != null ? SerializedDisplayValue(property) : null;
+        }
+
+        private static object SerializedDisplayValue(SerializedProperty property) => property.propertyType switch
+        {
+            SerializedPropertyType.Integer => property.intValue,
+            SerializedPropertyType.Boolean => property.boolValue,
+            SerializedPropertyType.Float => property.floatValue,
+            SerializedPropertyType.String => property.stringValue,
+            SerializedPropertyType.Color => property.colorValue,
+            SerializedPropertyType.Vector2 => property.vector2Value,
+            SerializedPropertyType.Vector3 => property.vector3Value,
+            SerializedPropertyType.Vector4 => property.vector4Value,
+            SerializedPropertyType.Quaternion => property.quaternionValue,
+            SerializedPropertyType.Rect => property.rectValue,
+            SerializedPropertyType.Bounds => property.boundsValue,
+            SerializedPropertyType.LayerMask => (LayerMask)property.intValue,
+            SerializedPropertyType.Enum => property.enumValueIndex >= 0 && property.enumValueIndex < property.enumDisplayNames.Length
+                ? property.enumDisplayNames[property.enumValueIndex] : (object)property.intValue,
+            SerializedPropertyType.ObjectReference => property.objectReferenceValue != null ? property.objectReferenceValue : (object)"None",
+            _ => $"({property.type})",
+        };
 
         /// <summary>"m_LocalPosition.x" -> "Local Position X" — humanizes the leading serialized field
         /// name the normal way (<see cref="UnityYamlFieldNames.Humanize"/>) and appends any remaining
