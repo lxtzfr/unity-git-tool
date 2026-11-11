@@ -177,6 +177,16 @@
     -unity-font-style: bold;
 }
 
+/* A prefab override, marked like the Inspector does: blue bar + bold name. */
+.gt-row-overridden {
+    border-left-width: 2px;
+    border-left-color: rgb(1, 153, 235);
+}
+
+.gt-row-overridden > Label {
+    -unity-font-style: bold;
+}
+
 .gt-property-cell {
     flex-direction: row;
     align-items: flex-start;

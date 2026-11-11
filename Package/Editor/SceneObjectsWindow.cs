@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UIElements;
@@ -18,7 +19,7 @@ namespace UnityGitTool
         private MultiColumnListView _table;
         private Label _statusLabel;
         private List<SceneYamlRow> _rows = new();
-        private Dictionary<long, GitYamlDocument> _byId = new();
+        private YamlHierarchy _hierarchy;
         private string _scenePath;
         private string _sceneGuid;
         private int _gameObjectCount;
@@ -111,9 +112,11 @@ namespace UnityGitTool
             var scene = SceneManager.GetActiveScene();
             _scenePath = scene.path;
             _sceneGuid = AssetDatabase.AssetPathToGUID(_scenePath);
-            _byId = string.IsNullOrEmpty(_scenePath) || !File.Exists(_scenePath)
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var sources = new YamlHierarchy.SourceCache();
+            _hierarchy = YamlHierarchy.Resolve(string.IsNullOrEmpty(_scenePath) || !File.Exists(_scenePath)
                 ? new Dictionary<long, GitYamlDocument>()
-                : UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(_scenePath)));
+                : UnityYamlDiffBuilder.IndexByFileId(UnityYamlParser.Parse(File.ReadAllText(_scenePath))), sources);
 
             var expandedObjects = new HashSet<(ulong, ulong)>();
             if (_treeBuilt)
@@ -121,10 +124,11 @@ namespace UnityGitTool
                     if (_tree.IsExpanded(id)) expandedObjects.Add(key);
 
             var nextId = 0;
-            var roots = SceneYamlTree.Build(_byId, () => nextId++);
+            var roots = SceneYamlTree.Build(_hierarchy, () => nextId++);
             _treeIdByObject.Clear();
             _gameObjectCount = 0;
             IndexNodes(roots);
+            Debug.Log($"[UnityGitTool] Scene Objects: read {_scenePath} + {sources.FilesRead} prefab files, {_gameObjectCount} GameObjects in {watch.ElapsedMilliseconds} ms");
 
             var firstBuild = !_treeBuilt;
             _treeBuilt = true;
@@ -143,7 +147,7 @@ namespace UnityGitTool
         {
             foreach (var item in items)
             {
-                if (item.data.Kind == SceneYamlNodeKind.GameObject) _gameObjectCount++;
+                _gameObjectCount++;
                 _treeIdByObject.TryAdd(ObjectKey(item.data), item.id);
                 IndexNodes(item.children);
             }
@@ -183,10 +187,9 @@ namespace UnityGitTool
 
         /// <summary>The (targetObjectId, targetPrefabId) pair Unity's GlobalObjectId gives the loaded
         /// object: the scene fileID for a plain GameObject; for an object inside a prefab instance, its
-        /// fileID in the source prefab, with the instance's fileID as prefab id.</summary>
-        private static (ulong, ulong) ObjectKey(SceneYamlNode node) => node.Kind == SceneYamlNodeKind.GameObject
-            ? ((ulong)node.FileId, 0UL)
-            : ((ulong)node.SourceFileId, (ulong)node.PrefabInstanceId);
+        /// fileID in the source prefab (nested ones combined), with the scene instance's fileID as prefab id.</summary>
+        private static (ulong, ulong) ObjectKey(SceneYamlNode node) =>
+            ((ulong)node.GameObject.GlobalObjectId, (ulong)node.GameObject.GlobalPrefabId);
 
         private void OnTreeSelectionChanged(IEnumerable<object> selection)
         {
@@ -252,7 +255,7 @@ namespace UnityGitTool
 
         private void ShowRows(SceneYamlNode node)
         {
-            _rows = node != null ? SceneYamlTree.BuildRows(node, _byId) : new List<SceneYamlRow>();
+            _rows = node != null ? SceneYamlTree.BuildRows(node, _hierarchy) : new List<SceneYamlRow>();
             if (_table == null) return;
             _table.itemsSource = _rows;
             _table.Rebuild();
@@ -282,6 +285,7 @@ namespace UnityGitTool
             icon.style.display = row.IsHeader ? DisplayStyle.Flex : DisplayStyle.None;
             icon.image = row.IsHeader ? UnityGitToolWindow.GetIcon(row.HeaderIcon) : null;
             label.text = row.Property;
+            element.EnableInClassList("gt-row-overridden", row.Overridden);
         }
 
         private static VisualElement MakeValueCell()
@@ -296,7 +300,16 @@ namespace UnityGitTool
         {
             element.Clear(); // cells are recycled across rows, the previous field type may differ
             element.EnableInClassList("gt-row-header", row.IsHeader);
-            if (!row.IsHeader) element.Add(FieldFactory.Create(row.Value));
+            if (row.IsHeader) return;
+            if (row.Value is SerializedProperty property)
+            {
+                var field = new PropertyField(property, string.Empty);
+                field.BindProperty(property);
+                field.SetEnabled(false);
+                field.AddToClassList("gt-value-field");
+                element.Add(field);
+            }
+            else element.Add(FieldFactory.Create(row.Value));
         }
 
         // ------------------------------------------------------------------------- footer --
