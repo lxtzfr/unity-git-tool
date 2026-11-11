@@ -23,6 +23,7 @@ namespace UnityGitTool
         {
             var pane = new VisualElement { style = { flexGrow = 1 } };
             pane.Add(BuildPanelTitle(isMerge ? "Diff / Merge" : "Diff"));
+            pane.Add(BuildBreadcrumb());
 
             _columnA = BuildColumn("A", 210, r => r.ValueA, ColumnSide.A);
             _columnB = BuildColumn("B", 210, r => r.ValueB, ColumnSide.B);

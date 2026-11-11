@@ -27,7 +27,9 @@ namespace UnityGitTool
         private VisualElement BuildTreePanel(string title, bool isResultTree, out TreeView treeView)
         {
             var pane = new VisualElement { style = { flexGrow = 1 } };
-            pane.Add(BuildPanelTitle(title));
+            var titleBar = BuildPanelTitle(title);
+            if (!isResultTree) titleBar.Add(BuildChangedOnlyToggle());
+            pane.Add(titleBar);
 
             var tree = new TreeView
             {
@@ -52,6 +54,7 @@ namespace UnityGitTool
             if (selection.FirstOrDefault() is not MockNode node) return;
 
             _selectedNode = node;
+            UpdateBreadcrumb();
             // OwnRowsByNodeId, not RowsByNodeId — a file node's (and an ancestor GameObject's)
             // RowsByNodeId entry aggregates every descendant's rows too (see BuildFileNode /
             // BuildGameObjectSubtree), which is what ApplyResolution needs but would otherwise
@@ -269,17 +272,19 @@ namespace UnityGitTool
             }
             Walk(_roots, "", true);
 
+            var displayed = DisplayedRoots();
             foreach (var tree in new[] { _tree, _resultTree })
             {
                 if (tree == null) continue;
-                tree.SetRootItems(_roots);
+                tree.SetRootItems(displayed);
                 tree.Rebuild();
-                foreach (var id in expandIds) tree.ExpandItem(id, false, false);
+                foreach (var id in expandIds.Where(_displayedIds.Contains)) tree.ExpandItem(id, false, false);
                 tree.RefreshItems();
             }
             RefreshTable();
+            UpdateBreadcrumb();
 
-            if (selectId.HasValue) _tree.SetSelectionById(selectId.Value); // refills the table through OnTreeSelectionChanged
+            if (selectId.HasValue && _displayedIds.Contains(selectId.Value)) _tree.SetSelectionById(selectId.Value); // refills the table through OnTreeSelectionChanged
             var scrollView = _tree.Q<ScrollView>();
             scrollView?.schedule.Execute(() => scrollView.scrollOffset = state.Scroll);
             UpdatePendingRollbacks();
@@ -298,6 +303,10 @@ namespace UnityGitTool
             var label = new Label();
             label.AddToClassList("gt-tree-label");
             row.Add(label);
+
+            var parentPath = new Label();
+            parentPath.AddToClassList("gt-tree-path");
+            row.Add(parentPath);
 
             var conflictIcon = new Image { scaleMode = ScaleMode.ScaleToFit, image = GetIcon("console.warnicon"), tooltip = "Contains unresolved conflicts" };
             conflictIcon.AddToClassList("gt-tree-icon");
@@ -333,9 +342,13 @@ namespace UnityGitTool
         {
             var typeIcon = (Image)element[0];
             var label = (Label)element[1];
-            var conflictIcon = (Image)element[2];
-            var badgeLabel = (Label)element[3];
-            var rollbackCount = element[4];
+            var parentPath = (Label)element[2];
+            var conflictIcon = (Image)element[3];
+            var badgeLabel = (Label)element[4];
+            var rollbackCount = element[5];
+
+            parentPath.text = _changedOnly ? ParentPathLabel(node) : "";
+            parentPath.style.display = parentPath.text.Length > 0 ? DisplayStyle.Flex : DisplayStyle.None;
 
             var pending = isResultTree ? 0 : CountRollbacks(node.Id);
             rollbackCount.style.display = pending > 0 ? DisplayStyle.Flex : DisplayStyle.None;

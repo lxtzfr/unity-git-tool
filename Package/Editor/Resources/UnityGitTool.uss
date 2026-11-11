@@ -90,6 +90,61 @@
     letter-spacing: 1px;
 }
 
+.gt-title-toggle {
+    margin: 0 0 0 auto;
+}
+
+/* The toggle's own label must not take the panel title's small bold caps. */
+.gt-panel-title .gt-title-toggle Label {
+    -unity-font-style: normal;
+    font-size: 11px;
+    opacity: 1;
+    letter-spacing: 0;
+    min-width: 0;
+    margin-right: 4px;
+}
+
+/* "Changed only": the node's ancestors, dimmed after its name. */
+.gt-tree-path {
+    opacity: 0.45;
+    margin-left: 6px;
+    flex-shrink: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.gt-breadcrumb {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 3px 8px;
+    flex-shrink: 0;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 0, 0, 0.15);
+}
+
+.gt-breadcrumb > Label {
+    opacity: 0.5;
+    margin: 0 2px;
+}
+
+.gt-breadcrumb-segment {
+    border-width: 0;
+    background-color: rgba(0, 0, 0, 0);
+    margin: 0;
+    padding: 1px 4px;
+}
+
+.gt-breadcrumb-segment:hover {
+    background-color: rgba(128, 128, 128, 0.22);
+}
+
+/* Disabled because it's the current node, not because it can't be reached: keep it readable. */
+.gt-breadcrumb-current:disabled {
+    opacity: 1;
+    -unity-font-style: bold;
+}
+
 .gt-tree, .gt-table {
     flex-grow: 1;
 }
