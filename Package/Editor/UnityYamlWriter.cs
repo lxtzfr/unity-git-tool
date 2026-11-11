@@ -746,7 +746,7 @@ namespace UnityGitTool
         {
             // A field belonging to a document that's being wholly deleted needs no edit of its own —
             // the whole document (and this field along with it) is already gone via BuildDeletionEdits.
-            var candidates = rows.Where(r => !r.IsHeader && r.FileId != 0 && r.Key != null && !toDelete.Contains(r.FileId));
+            var candidates = rows.Where(r => !r.IsHeader && r.FileId != 0 && r.Key != null && !toDelete.Contains(r.FileId)).SelectMany(r => r.ExpandKeys());
 
             foreach (var row in candidates)
             {

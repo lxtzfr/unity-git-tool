@@ -789,7 +789,12 @@ namespace UnityGitTool
                 var targetRows = rowsByObject[groupIndex].Rows;
                 targetRows.Add(new MockRow { IsHeader = true, Property = target.Label, HeaderIcon = target.Icon });
 
-                foreach (var (propertyPath, entryA, entryB) in entries)
+                var rotationEntries = entries.Where(e => IsRotationPath(e.PropertyPath)).ToList();
+                if (rotationEntries.Count > 0)
+                    targetRows.Add(BuildRotationOverrideRow(instanceId, targetId, target.Target, rotationEntries, entriesA, entriesB,
+                        instanceA != null, instanceB != null, fileIsConflicted, bIsOlderBaseline));
+
+                foreach (var (propertyPath, entryA, entryB) in entries.Where(e => !IsRotationPath(e.PropertyPath)))
                 {
                     var hasA = entryA != null;
                     var hasB = entryB != null;
@@ -955,6 +960,59 @@ namespace UnityGitTool
         }
 
         private const string ArraySizeSuffix = ".Array.size";
+        private const string RotationPrefix = "m_LocalRotation.";
+        private const string EulerHintPrefix = "m_LocalEulerAnglesHint.";
+
+        private static bool IsRotationPath(string propertyPath) =>
+            propertyPath.StartsWith(RotationPrefix) || propertyPath.StartsWith(EulerHintPrefix);
+
+        /// <summary>A Transform's rotation overrides as the Inspector shows them: one Euler row instead
+        /// of raw quaternion components. Carries every changed key, so taking / rolling it back writes
+        /// the quaternion and the hint together (a lone component would denormalize the quaternion).</summary>
+        private static MockRow BuildRotationOverrideRow(
+            long instanceId, string targetId, UnityEngine.Object target,
+            List<(string PropertyPath, Dictionary<string, object> A, Dictionary<string, object> B)> changed,
+            Dictionary<string, Dictionary<string, object>> entriesA, Dictionary<string, Dictionary<string, object>> entriesB,
+            bool instanceExistsA, bool instanceExistsB, bool fileIsConflicted, bool bIsOlderBaseline)
+        {
+            var keys = changed.Select(e => $"m_Modification.m_Modifications::{targetId}::{e.PropertyPath}").ToList();
+            var hasA = changed.Any(e => e.A != null);
+            var hasB = changed.Any(e => e.B != null);
+            var valueA = instanceExistsA ? (object)RotationEuler(targetId, target, entriesA) : null;
+            var valueB = instanceExistsB ? (object)RotationEuler(targetId, target, entriesB) : null;
+            var isConflict = fileIsConflicted && hasA && hasB;
+            return new MockRow
+            {
+                Property = "Rotation",
+                FileId = instanceId,
+                Key = keys[0],
+                ExtraKeys = keys.Count > 1 ? keys.Skip(1).ToList() : null,
+                BIsOlderBaseline = bIsOlderBaseline,
+                ValueA = valueA,
+                ValueB = valueB,
+                IsConflict = isConflict,
+                Resolution = isConflict ? MockResolution.Unresolved : hasA ? MockResolution.A : MockResolution.B,
+                Result = isConflict ? null : hasA ? valueA : valueB,
+            };
+        }
+
+        /// <summary>One side's local rotation in degrees: the Euler hint when that side overrides it
+        /// (what the Inspector shows, e.g. 3 rather than 2.9999), else the quaternion's angles. Each
+        /// axis not overridden is the source prefab's.</summary>
+        private static Vector3 RotationEuler(string targetId, UnityEngine.Object target, Dictionary<string, Dictionary<string, object>> entries)
+        {
+            float Axis(string prefix, string axis, float inherited) =>
+                entries.TryGetValue($"{targetId}::{prefix}{axis}", out var entry) && entry.GetValueOrDefault("value") is string raw &&
+                float.TryParse(raw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : inherited;
+
+            var transform = target as Transform;
+            var hint = transform != null ? TransformUtils.GetInspectorRotation(transform) : Vector3.zero;
+            if (new[] { "x", "y", "z" }.Any(a => entries.ContainsKey($"{targetId}::{EulerHintPrefix}{a}")))
+                return new Vector3(Axis(EulerHintPrefix, "x", hint.x), Axis(EulerHintPrefix, "y", hint.y), Axis(EulerHintPrefix, "z", hint.z));
+
+            var q = transform != null ? transform.localRotation : Quaternion.identity;
+            return new Quaternion(Axis(RotationPrefix, "x", q.x), Axis(RotationPrefix, "y", q.y), Axis(RotationPrefix, "z", q.z), Axis(RotationPrefix, "w", q.w)).eulerAngles;
+        }
 
         /// <summary>One side of an override row: the override's own value, else (instance present, no
         /// override) the value inherited from the source prefab. An <c>Array.size</c> row shows the

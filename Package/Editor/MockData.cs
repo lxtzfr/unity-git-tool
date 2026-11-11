@@ -65,6 +65,23 @@ namespace UnityGitTool
         /// on a header row, which carries no field of its own.</summary>
         public long FileId;
         public string Key;
+        /// <summary>Further raw keys this one row stands for (a prefab Rotation override is up to four
+        /// quaternion entries plus the Euler hint); the writer applies each like <see cref="Key"/>.</summary>
+        public List<string> ExtraKeys;
+
+        /// <summary>One row per key, for the writer.</summary>
+        public IEnumerable<MockRow> ExpandKeys()
+        {
+            yield return this;
+            if (ExtraKeys == null) yield break;
+            foreach (var key in ExtraKeys)
+            {
+                var copy = (MockRow)MemberwiseClone();
+                copy.Key = key;
+                copy.ExtraKeys = null;
+                yield return copy;
+            }
+        }
 
         /// <summary>Same meaning as <see cref="UnityYamlDiffBuilder.BuildFileNode"/>'s parameter of the
         /// same name — whether B is actually the OLDER side despite being on the "B" side of every

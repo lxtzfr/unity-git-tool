@@ -159,17 +159,34 @@ namespace UnityGitTool
         /// removed from the prefab); null only when the guid doesn't resolve to any asset at all.</summary>
         internal static object ResolvePrefabSourceObjectName(string guid, string fileId, string typeNameFallback = null)
         {
-            if (fileId != null && GlobalObjectId.TryParse($"GlobalObjectId_V1-3-{guid}-{fileId}-0", out var goid))
-            {
-                var precise = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(goid);
-                if (precise != null) return precise;
-            }
-
             var path = AssetDatabase.GUIDToAssetPath(guid);
             if (string.IsNullOrEmpty(path)) return null;
+
+            if (fileId != null && long.TryParse(fileId, out var localId) && ObjectsByLocalId(guid, path).TryGetValue(localId, out var precise) && precise != null)
+                return precise;
+
             var asset = AssetDatabase.LoadMainAssetAtPath(path);
             if (asset != null) return asset;
             return typeNameFallback != null ? $"{Path.GetFileNameWithoutExtension(path)} ({typeNameFallback})" : Path.GetFileNameWithoutExtension(path);
+        }
+
+        private static readonly Dictionary<string, Dictionary<long, UnityEngine.Object>> ObjectsByLocalIdCache = new();
+
+        /// <summary>Called once per tree build: an asset edited since must not answer from the old index.</summary>
+        internal static void ClearSourceObjectCache() => ObjectsByLocalIdCache.Clear();
+
+        /// <summary>Every object of the asset by its local file id. A GlobalObjectId lookup needs the
+        /// right identifier type per asset kind (scene object, native asset, imported model) and logs
+        /// "Failed to load" for an FBX when it's wrong; the asset's own objects work for every kind.</summary>
+        private static Dictionary<long, UnityEngine.Object> ObjectsByLocalId(string guid, string path)
+        {
+            if (ObjectsByLocalIdCache.TryGetValue(guid, out var cached)) return cached;
+            var index = new Dictionary<long, UnityEngine.Object>();
+            foreach (var obj in AssetDatabase.LoadAllAssetsAtPath(path))
+                if (obj != null && AssetDatabase.TryGetGUIDAndLocalFileIdentifier(obj, out string _, out long id))
+                    index[id] = obj;
+            ObjectsByLocalIdCache[guid] = index;
+            return index;
         }
 
         private static bool HasKeys(Dictionary<string, object> map, params string[] keys) =>

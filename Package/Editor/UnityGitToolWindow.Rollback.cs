@@ -145,7 +145,7 @@ namespace UnityGitTool
 
                 var rows = MockDataSource.RowsByNodeId.GetValueOrDefault(fileNode.Id) ?? new List<MockRow>();
                 var fieldRows = rows.Where(r => r.MarkedForRollback && !r.IsHeader)
-                    .Select(r => new MockRow { FileId = r.FileId, Key = r.Key, Property = r.Property, Resolution = MockResolution.B })
+                    .Select(r => new MockRow { FileId = r.FileId, Key = r.Key, ExtraKeys = r.ExtraKeys, Property = r.Property, Resolution = MockResolution.B })
                     .ToList();
 
                 var restoreIds = new HashSet<long>();

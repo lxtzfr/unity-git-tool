@@ -126,6 +126,7 @@ namespace UnityGitTool
         private void RefreshTree()
         {
             var state = CaptureTreeState();
+            UnityYamlValueConverter.ClearSourceObjectCache();
             MockDataSource.RowsByNodeId.Clear();
             MockDataSource.OwnRowsByNodeId.Clear();
             MockDataSource.GameObjectNodesByNodeId.Clear();
@@ -145,6 +146,7 @@ namespace UnityGitTool
         private void RefreshFiles(IEnumerable<string> paths)
         {
             var state = CaptureTreeState();
+            UnityYamlValueConverter.ClearSourceObjectCache();
             var conflictedPaths = new HashSet<string>(GitFileReader.GetConflictedFiles());
             var filesByPath = ListChangedFiles(conflictedPaths);
 
