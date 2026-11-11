@@ -738,6 +738,11 @@ namespace UnityGitTool
             foreach (var fieldKey in new[] { "m_RemovedComponents", "m_RemovedGameObjects", "m_AddedGameObjects", "m_AddedComponents" })
                 if (!YamlValuesEqual(GetModificationList(a, fieldKey), GetModificationList(b, fieldKey))) return true;
 
+            // Same list, but an added component's own fields edited.
+            foreach (var (componentId, _) in AddedComponentTargets(b))
+                if (byIdA.TryGetValue(componentId, out var compA) && byIdB.TryGetValue(componentId, out var compB) &&
+                    DiffFields(0, compA.Fields, compB.Fields, ComponentIgnoredKeys, byIdA, byIdB, false).Count > 0) return true;
+
             return false;
         }
 
@@ -822,9 +827,40 @@ namespace UnityGitTool
             AddListDiffRow(rows, instanceId, instanceA, instanceB, "m_RemovedComponents", "Removed Components", sourceGuid, fileIsConflicted, bIsOlderBaseline);
             AddListDiffRow(rows, instanceId, instanceA, instanceB, "m_RemovedGameObjects", "Removed GameObjects", sourceGuid, fileIsConflicted, bIsOlderBaseline);
             AddAddedListDiffRow(rows, instanceA, instanceB, "m_AddedGameObjects", "Added GameObjects", byIdA, byIdB);
-            AddAddedListDiffRow(rows, instanceA, instanceB, "m_AddedComponents", "Added Components", byIdA, byIdB);
+
+            // A component added on the instance reads like the Inspector's "+ Component": under the
+            // source object it sits on, as a component whose document exists on one side or both.
+            foreach (var (componentId, targetId) in AddedComponentTargets(instanceA).Concat(AddedComponentTargets(instanceB)).Distinct())
+            {
+                byIdA.TryGetValue(componentId, out var compA);
+                byIdB.TryGetValue(componentId, out var compB);
+                var componentRows = BuildComponentRows(compA, compB, byIdA, byIdB, fileIsConflicted, bIsOlderBaseline, out var changed);
+                if (!changed) continue;
+
+                var target = DescribeModificationTarget(sourceGuid, targetId);
+                object groupKey = target.Owner != null ? target.Owner : targetId;
+                if (!groupIndexByKey.TryGetValue(groupKey, out var groupIndex))
+                {
+                    groupIndex = rowsByObject.Count;
+                    groupIndexByKey[groupKey] = groupIndex;
+                    rowsByObject.Add((target.OwnerLabel, target.Owner, new List<MockRow>()));
+                }
+                componentRows[0].Property += " (added on instance)";
+                rowsByObject[groupIndex].Rows.AddRange(componentRows);
+            }
 
             return rows;
+        }
+
+        /// <summary>(added component's own id, source object id it sits on) per
+        /// <c>m_AddedComponents</c> entry.</summary>
+        private static IEnumerable<(long ComponentId, string TargetId)> AddedComponentTargets(GitYamlDocument instance)
+        {
+            foreach (var entry in GetModificationList(instance, "m_AddedComponents").OfType<Dictionary<string, object>>())
+                if (entry.GetValueOrDefault("addedObject") is Dictionary<string, object> added && TryGetFileId(added, out var componentId) &&
+                    entry.GetValueOrDefault("targetCorrespondingSourceObject") is Dictionary<string, object> target &&
+                    target.GetValueOrDefault("fileID") is string targetId)
+                    yield return (componentId, targetId);
         }
 
         /// <summary>A whole-list row (<c>m_RemovedComponents</c>/<c>m_RemovedGameObjects</c>) — unlike
@@ -863,7 +899,7 @@ namespace UnityGitTool
         }
 
         /// <summary>Same display idea as <see cref="AddListDiffRow"/> but for
-        /// <c>m_AddedGameObjects</c>/<c>m_AddedComponents</c> — deliberately informational only
+        /// <c>m_AddedGameObjects</c> (added components are component rows, see BuildPrefabInstanceRows) — deliberately informational only
         /// (<see cref="MockRow.Key"/> left null, <see cref="MockRow.FileId"/> left 0): taking an
         /// "added" override from one side into the other means synthesizing whole new
         /// GameObject/component/stripped-placeholder documents that may not exist on the other side at

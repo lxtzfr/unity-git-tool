@@ -102,6 +102,9 @@ namespace UnityGitTool
             {
                 var path = AssetDatabase.GUIDToAssetPath(guid);
                 if (string.IsNullOrEmpty(path)) return $"guid:{guid}";
+                // The exact sub-asset (an FBX's mesh, a material inside a model), else the main asset.
+                if (long.TryParse(fileId, out var localId) && ObjectsByLocalId(guid, path).TryGetValue(localId, out var subAsset) && subAsset != null)
+                    return subAsset;
                 var asset = AssetDatabase.LoadMainAssetAtPath(path);
                 return asset != null ? asset : Path.GetFileName(path);
             }

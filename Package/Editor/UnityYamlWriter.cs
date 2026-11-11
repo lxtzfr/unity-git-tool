@@ -59,6 +59,7 @@ namespace UnityGitTool
             var skipped = new List<string>();
 
             var (toDelete, componentOwners, childParents) = CollectDeletionCascade(deletedGameObjectIds, deletedComponentIds, baseById);
+            DeleteOrphanedStrippedOwners(toDelete, componentOwners, baseById, baseLines);
 
             var edits = new List<LineEdit>();
             edits.AddRange(BuildDeletionEdits(toDelete, baseById, skipped));
@@ -192,7 +193,17 @@ namespace UnityGitTool
             }
 
             foreach (var (componentId, ownerId) in componentOwners)
+            {
+                // Added on a prefab instance: listed in that instance's m_AddedComponents, not in the
+                // stripped owner (which has no m_Component).
+                if (baseById.TryGetValue(ownerId, out var ownerDoc) && ownerDoc.Stripped)
+                {
+                    if (TryGetReferenceFileId(ownerDoc, "m_PrefabInstance", out var instanceId) && !toDelete.Contains(instanceId))
+                        AddTarget(instanceId, AddedComponentsKey, componentId);
+                    continue;
+                }
                 AddTarget(ownerId, "m_Component", componentId);
+            }
 
             foreach (var (transformId, parentId) in childParents)
                 if (UnityYamlDiffBuilder.FindTransformId(parentId, baseById) is { } parentTransformId)
@@ -208,8 +219,119 @@ namespace UnityGitTool
                         AddTarget(sceneRoots.FileId, "m_Roots", id);
 
             foreach (var ((ownerDocId, fieldKey), targetIds) in targetsByField)
-                foreach (var edit in BuildReferenceRemovalEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
+                foreach (var edit in fieldKey == AddedComponentsKey
+                    ? BuildAddedComponentEntryRemovalEdits(baseById, ownerDocId, targetIds, baseLines, skipped)
+                    : BuildReferenceRemovalEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
                     yield return edit;
+        }
+
+        /// <summary>A component added on a prefab instance hangs off a stripped placeholder of its
+        /// target; once the last document referencing that placeholder is deleted, it goes too.</summary>
+        private static void DeleteOrphanedStrippedOwners(HashSet<long> toDelete, Dictionary<long, long> componentOwners,
+            Dictionary<long, GitYamlDocument> baseById, List<string> baseLines)
+        {
+            var candidates = componentOwners.Values.Distinct()
+                .Where(id => !toDelete.Contains(id) && baseById.TryGetValue(id, out var d) && d.Stripped).ToList();
+            if (candidates.Count == 0) return;
+
+            var referenced = new HashSet<long>();
+            foreach (var doc in baseById.Values.Where(d => !toDelete.Contains(d.FileId) && !candidates.Contains(d.FileId)))
+                for (var i = doc.HeaderLine + 1; i < doc.BodyEndLine; i++)
+                    foreach (System.Text.RegularExpressions.Match m in FileIdValuePattern.Matches(baseLines[i]))
+                        if (long.TryParse(m.Groups[1].Value, out var id) && candidates.Contains(id))
+                            referenced.Add(id);
+
+            foreach (var id in candidates.Where(id => !referenced.Contains(id)))
+                toDelete.Add(id);
+        }
+
+        private const string AddedComponentsKey = "m_Modification.m_AddedComponents";
+        private static readonly System.Text.RegularExpressions.Regex AddedObjectPattern = new(@"addedObject: \{fileID: (-?\d+)\}");
+
+        /// <summary>Each <c>m_AddedComponents</c> entry's line range (several lines: target, insertIndex,
+        /// addedObject), by its added component's id.</summary>
+        private static Dictionary<long, (int Start, int End)> AddedComponentEntries(List<string> lines, LineSpan span)
+        {
+            var entries = new Dictionary<long, (int Start, int End)>();
+            var start = -1;
+            var itemIndent = -1;
+            void Close(int end)
+            {
+                if (start < 0) return;
+                for (var i = start; i < end; i++)
+                    if (AddedObjectPattern.Match(lines[i]) is { Success: true } m && long.TryParse(m.Groups[1].Value, out var id))
+                        entries[id] = (start, end);
+            }
+            for (var i = span.Start + 1; i < span.End; i++)
+            {
+                var trimmed = lines[i].TrimStart();
+                var indent = lines[i].Length - trimmed.Length;
+                if (!trimmed.StartsWith("- ") || (itemIndent >= 0 && indent != itemIndent)) continue;
+                Close(i);
+                start = i;
+                itemIndent = indent;
+            }
+            Close(span.End);
+            return entries;
+        }
+
+        private static IEnumerable<LineEdit> BuildAddedComponentEntryRemovalEdits(
+            Dictionary<long, GitYamlDocument> baseById, long instanceId, List<long> componentIds, List<string> baseLines, List<string> skipped)
+        {
+            if (!baseById.TryGetValue(instanceId, out var instance) || !instance.FieldSpans.TryGetValue(AddedComponentsKey, out var span))
+            {
+                skipped.Add($"PrefabInstance #{instanceId}: its m_AddedComponents list wasn't found — file may need a manual cleanup pass");
+                yield break;
+            }
+            var entries = AddedComponentEntries(baseLines, span);
+            var removed = componentIds.Where(entries.ContainsKey).ToList();
+            foreach (var id in componentIds.Except(removed))
+                skipped.Add($"#{id}: not listed in PrefabInstance #{instanceId}'s m_AddedComponents — file may need a manual cleanup pass");
+            if (removed.Count == 0) yield break;
+
+            if (removed.Count == entries.Count)
+            {
+                var keyLine = baseLines[span.Start];
+                var indent = keyLine.Substring(0, keyLine.Length - keyLine.TrimStart().Length);
+                yield return new LineEdit(span.Start, span.End - span.Start, new List<string> { $"{indent}m_AddedComponents: []" });
+                yield break;
+            }
+            foreach (var id in removed)
+                yield return new LineEdit(entries[id].Start, entries[id].End - entries[id].Start, new List<string>());
+        }
+
+        private static IEnumerable<LineEdit> BuildAddedComponentEntryAddEdits(
+            Dictionary<long, GitYamlDocument> baseById, Dictionary<long, GitYamlDocument> otherById, long instanceId, List<long> componentIds,
+            List<string> baseLines, List<string> otherLines, List<string> skipped)
+        {
+            if (!baseById.TryGetValue(instanceId, out var instance) || !instance.FieldSpans.TryGetValue(AddedComponentsKey, out var span) ||
+                !otherById.TryGetValue(instanceId, out var otherInstance) || !otherInstance.FieldSpans.TryGetValue(AddedComponentsKey, out var otherSpan))
+            {
+                skipped.Add($"PrefabInstance #{instanceId}: its m_AddedComponents list wasn't found — restored component(s) not listed on it");
+                yield break;
+            }
+            var existing = AddedComponentEntries(baseLines, span);
+            var otherEntries = AddedComponentEntries(otherLines, otherSpan);
+            var newLines = new List<string>();
+            foreach (var id in componentIds.Where(id => !existing.ContainsKey(id)))
+            {
+                if (!otherEntries.TryGetValue(id, out var range))
+                {
+                    skipped.Add($"#{id}: not listed in the other side's m_AddedComponents — not linked to PrefabInstance #{instanceId}");
+                    continue;
+                }
+                newLines.AddRange(otherLines.GetRange(range.Start, range.End - range.Start));
+            }
+            if (newLines.Count == 0) yield break;
+
+            var keyLine = baseLines[span.Start];
+            if (keyLine.TrimEnd().EndsWith("[]"))
+            {
+                var indent = keyLine.Substring(0, keyLine.Length - keyLine.TrimStart().Length);
+                yield return new LineEdit(span.Start, 1, new List<string> { $"{indent}m_AddedComponents:" }.Concat(newLines).ToList());
+            }
+            else
+                yield return new LineEdit(span.End, 0, newLines);
         }
 
         /// <summary>Removes every line in <paramref name="fieldKey"/>'s list pointing at one of
@@ -376,9 +498,14 @@ namespace UnityGitTool
                 if (ownerId == 0) continue; // standalone (embedded Mesh / Material, settings): only ever referenced by fileID, no owner list
                 // A stripped owner (Unity's PrefabInstance.m_AddedComponents case — see
                 // IsPrefabBoundDependency) has no m_Component list to append into at all; Unity finds
-                // this component via the owning PrefabInstance's own m_AddedComponents entry instead,
-                // already copied verbatim once that PrefabInstance is restored — nothing to fix up here.
-                if (otherById.TryGetValue(ownerId, out var ownerDoc) && ownerDoc.Stripped) continue;
+                // this component via the owning PrefabInstance's own m_AddedComponents entry instead:
+                // copied verbatim when that PrefabInstance is restored too, else added to it here.
+                if (otherById.TryGetValue(ownerId, out var ownerDoc) && ownerDoc.Stripped)
+                {
+                    if (TryGetReferenceFileId(ownerDoc, "m_PrefabInstance", out var instanceId) && baseById.ContainsKey(instanceId) && !allRestored.Contains(instanceId))
+                        AddFixup(instanceId, AddedComponentsKey, id);
+                    continue;
+                }
                 // The owner is being restored in this same batch — its copied m_Component list (raw,
                 // from `other`) already references this component verbatim, nothing extra to add.
                 if (missing.Contains(ownerId)) continue;
@@ -436,7 +563,9 @@ namespace UnityGitTool
             }
 
             foreach (var ((ownerDocId, fieldKey), targetIds) in ownerFixups)
-                foreach (var edit in BuildReferenceAddEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
+                foreach (var edit in fieldKey == AddedComponentsKey
+                    ? BuildAddedComponentEntryAddEdits(baseById, otherById, ownerDocId, targetIds, baseLines, otherLines, skipped)
+                    : BuildReferenceAddEdits(baseById, ownerDocId, fieldKey, targetIds, baseLines, skipped))
                     yield return edit;
 
             foreach (var edit in BuildRestoreInsertionEdits(blockById, baseById, otherById, baseLines.Count))
